@@ -111,6 +111,9 @@ LLM token。典型开销约为 **每次运行 10–25K token** —— 比直接�
 或 **[templates/telegram/SETUP.md](templates/telegram/SETUP.md)**
 （→ [claude-code-telegram-multibot](https://github.com/Lihan-Zhong/claude-code-telegram-multibot)）。
 
+> 🧩 **想换别的聊天平台**（比如微信 / WeiXin），**或者用 Codex 智能体**而不是 Claude Code？
+> 这两种桥接方式都可以参考 **[codex-chat-bridge](https://github.com/Lihan-Zhong/codex-chat-bridge)**。
+
 ---
 
 ## 快速开始

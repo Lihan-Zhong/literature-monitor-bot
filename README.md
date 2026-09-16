@@ -125,6 +125,10 @@ The Q&A bot is a project-bound Claude Code bot, set up per channel — see
 or **[templates/telegram/SETUP.md](templates/telegram/SETUP.md)**
 (→ [claude-code-telegram-multibot](https://github.com/Lihan-Zhong/claude-code-telegram-multibot)).
 
+> 🧩 **Want a different chat platform** (e.g. WeChat / WeiXin) **or a Codex-based agent**
+> instead of Claude Code? The bridge pattern for both is in
+> **[codex-chat-bridge](https://github.com/Lihan-Zhong/codex-chat-bridge)**.
+
 ---
 
 ## Quick start
