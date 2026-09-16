@@ -1,0 +1,23 @@
+{
+  "_comment": "Journal whitelist for the weekly journal scanner (v2). Edit freely.",
+  "journals": [
+    {"name": "Cell",                   "issn": "0092-8674"},
+    {"name": "Nature",                 "issn": "0028-0836"},
+    {"name": "Science",                "issn": "0036-8075"},
+    {"name": "Nature Biotechnology",   "issn": "1087-0156"},
+    {"name": "Nature Methods",         "issn": "1548-7091"},
+    {"name": "Nature Protocols",       "issn": "1754-2189"},
+    {"name": "Cell Genomics",          "issn": "2666-979X"},
+    {"name": "Nature Communications",  "issn": "2041-1723"},
+    {"name": "Genome Biology",         "issn": "1474-760X"},
+    {"name": "Genome Research",        "issn": "1088-9051"},
+    {"name": "Molecular Cell",         "issn": "1097-2765"},
+    {"name": "Nature Genetics",        "issn": "1061-4036"},
+    {"name": "Cell Reports Methods",   "issn": "2667-2375"},
+    {"name": "Cell Research",          "issn": "1001-0602"},
+    {"name": "Science Immunology",     "issn": "2470-9468"},
+    {"name": "Immunity",               "issn": "1074-7613"},
+    {"name": "Nature Immunology",      "issn": "1529-2908"},
+    {"name": "Nature Cancer",          "issn": "2662-1347"}
+  ]
+}

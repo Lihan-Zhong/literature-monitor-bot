@@ -1,0 +1,25 @@
+# ============================================================================
+# YOUR RESEARCH FOCUS  —  copy this file to config/research_focus.txt and fill it.
+# ============================================================================
+# This text is injected verbatim into EVERY LLM prompt (title triage, abstract
+# judge, deep read, journal-club prep). It is the single source of truth for
+# "what papers do I care about". Be concrete — the funnel scores relevance to
+# exactly what you write here.
+#
+# Write it in whatever language you want your digest in (the pipeline is
+# language-agnostic; the shipped prompts happen to summarize in Chinese).
+#
+# Two axes work well (a paper scoring on either is relevant; both = top score):
+#   - a TECHNOLOGY / METHODS axis  (the assays, platforms, analyses you follow)
+#   - a BIOLOGY / SYSTEM axis       (the organism, tissue, disease, question)
+#
+# TIP — let an agent optimize this end-to-end (see SKILL.md "Define your research
+# focus"): give Claude a paragraph about your work + 3-5 must-catch example
+# papers, and have it draft this file AND config/keywords.txt, then tune both by
+# dry-running triage/judge on recent papers until precision/recall look right.
+#
+# Lines starting with # and blank lines are ignored. Delete everything below and
+# write your own:
+#
+# TECH axis: <the methods / technologies / analyses you want to catch>
+# BIO axis:  <the biological system / disease / question you study>

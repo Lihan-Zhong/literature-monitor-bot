@@ -1,0 +1,17 @@
+# Stage 1 hard category whitelist (free, no LLM).
+# Only papers whose bioRxiv `category` field matches one of these
+# (case-insensitive) survive to the keyword pre-filter.
+# One category per line. Lines starting with # are comments.
+
+bioengineering
+bioinformatics
+cancer biology
+cell biology
+genomics
+immunology
+molecular biology
+biochemistry
+developmental biology
+neuroscience
+systems biology
+biophysics

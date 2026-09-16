@@ -1,0 +1,14 @@
+# Keyword pre-filter (Stage 1, FREE — no LLM).
+# If ANY keyword (case-insensitive, word-boundary) appears in a paper's title or
+# abstract, it passes to the LLM triage/judge. Keep this BROAD (high recall) —
+# the LLM makes the precise call. One keyword per line; # and blank lines ignored.
+#
+# These are GENERIC placeholders — replace with your own field's terms, or have a
+# deploy agent generate them from config/research_focus.txt (see SKILL.md).
+#
+# --- replace everything below ---
+single-cell
+single cell
+sequencing
+genomics
+epigenetics

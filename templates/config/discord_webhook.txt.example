@@ -1,0 +1,4 @@
+# Discord incoming-webhook URL (the PRIMARY push channel).
+# Copy to state/discord_webhook.txt, chmod 600, NEVER commit the real one.
+# Create it: Discord → target channel → Edit Channel → Integrations → Webhooks → New.
+https://discord.com/api/webhooks/XXXXXXXXXXXX/YYYYYYYYYYYYYYYYYYYYYYYYYYYY

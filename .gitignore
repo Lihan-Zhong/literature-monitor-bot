@@ -1,0 +1,22 @@
+# Python bytecode — .pyc files embed the absolute source path (co_filename),
+# which leaks the machine layout / username. Never commit them.
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets & per-deployment config (created from the *.example templates at setup).
+# These hold real webhook URLs / bot tokens / chat ids — MUST stay out of git.
+# (state/ below already covers state/discord_webhook.txt; listed here for clarity.)
+state/discord_webhook.txt
+config/telegram.env
+config/research_focus.txt
+config/keywords.txt
+
+# Runtime state, caches, logs, fetched papers/figures.
+state/
+cache/
+digests/
+figures/
+logs/
+*.log
+*.sqlite
