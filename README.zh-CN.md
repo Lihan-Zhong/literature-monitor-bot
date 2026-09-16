@@ -161,8 +161,10 @@ grep 到的独特标记。已经处理好的情况 —— 额度耗尽、临时�
   1 CPU、2 GB、1 小时。
 - **Python 3.9+** —— 核心流水线只用标准库。`pypdf` + **poppler**（`pdftoppm` / `pdftotext`）
   只有深读 / 取图 / JC 工具才需要。
-- **`claude` CLI**（[Claude Code](https://claude.com/claude-code)）在 `PATH` 上 —— 这是 LLM
-  引擎。调用形式为 `claude -p --tools ""`，prompt 通过 **stdin** 传入。
+- **一个智能体 CLI** 在 `PATH` 上 —— 即 LLM 引擎。开箱即用接了
+  **[Claude Code](https://claude.com/claude-code)**（`claude -p --tools ""`，prompt 通过
+  **stdin** 传入）；也可以换用 **Codex 智能体** —— 参考
+  **[codex-chat-bridge](https://github.com/Lihan-Zhong/codex-chat-bridge)**。
 - **一个 Discord incoming webhook**（主通道）。Telegram bot token 可选。
 - 可选：[Firecrawl](https://github.com/firecrawl/firecrawl) 作为深度追问的兜底抓取。
 

@@ -177,8 +177,10 @@ all found the hard way in production.
   itself is tiny — 1 CPU, 2 GB, 1 hour.
 - **Python 3.9+** — the core pipeline uses only the standard library. `pypdf` + **poppler**
   (`pdftoppm` / `pdftotext`) are needed only for the deep-read / figure / JC tools.
-- **The `claude` CLI** ([Claude Code](https://claude.com/claude-code)) on `PATH` — this is
-  the LLM engine. Calls use `claude -p --tools ""` with prompts on **stdin**.
+- **An agent CLI** on `PATH` — the LLM engine. Ships wired to
+  **[Claude Code](https://claude.com/claude-code)** (`claude -p --tools ""`, prompts on
+  **stdin**); a **Codex-based agent** works too — see
+  **[codex-chat-bridge](https://github.com/Lihan-Zhong/codex-chat-bridge)** for that pattern.
 - **A Discord incoming webhook** (primary channel). Telegram bot token optional.
 - Optional: [Firecrawl](https://github.com/firecrawl/firecrawl) as a deep-follow-up fallback.
 

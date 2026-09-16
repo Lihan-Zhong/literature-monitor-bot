@@ -93,9 +93,11 @@ it, and a channel `SETUP.md`. See [feed-sources doc](docs/feed-sources.md) for s
 1. **HPC with SLURM** and a queue you have **priority** on (a lab condo/allocation).
 2. **Python 3.9+** — core pipeline uses only the stdlib. `pypdf` + **poppler**
    (`pdftoppm`/`pdftotext`) are needed only for `deep_analyze`/`get_figure`/`jc_prep`.
-3. **The `claude` CLI** (Claude Code) on `PATH` — this is the LLM engine. Every call
+3. **An agent CLI** on `PATH` — the LLM engine. Ships wired to **Claude Code**: every call
    is `claude -p --tools "" ` (NO `--bare`; that forces API-key mode and breaks
-   OAuth/Team auth). Prompts go via **stdin**, never argv (so they don't leak in `ps`).
+   OAuth/Team auth), prompts via **stdin**, never argv (so they don't leak in `ps`). A
+   **Codex-based agent** works too — swap the `call_claude`/subprocess layer per
+   [codex-chat-bridge](https://github.com/Lihan-Zhong/codex-chat-bridge).
 4. **A Discord incoming webhook** (primary channel). Optionally a Telegram bot token.
 5. Optional: Firecrawl (deep-follow-up fallback), a project chat bot for Q&A.
 
