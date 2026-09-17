@@ -313,9 +313,17 @@ def main():
     notice_banner = f"\n⚠️ {html_escape(args.notice)}\n" if args.notice else ""
 
     if not papers:
+        # Self-check: on a genuinely healthy empty run (no quota hit, no notice),
+        # say so explicitly, so a real quiet day is distinguishable from a silent
+        # failure (which shows the ⚠️ banner instead).
+        selfcheck = ""
+        if not (args.quota_hit or args.notice.strip()):
+            selfcheck = ("\n✅ 自检正常：抓取 / 筛选 / 判读均成功完成"
+                         f"（扫描 {args.scanned} 篇 → 判读 {len(all_papers)} 篇 → 命中 0），"
+                         "确为「真·无相关文献」，非故障。")
         header = (f"📭 <b>{args.source}</b> {now_str}{quota_banner}{notice_banner}\n"
                   f"窗口: {window[0]} → {window[1]}\n"
-                  f"今日无相关文献\n{filter_footer}")
+                  f"今日无相关文献\n{filter_footer}{selfcheck}")
         msgs = [header]
     else:
         header = (f"📚 <b>{args.source}</b> {now_str}{quota_banner}{notice_banner}\n"

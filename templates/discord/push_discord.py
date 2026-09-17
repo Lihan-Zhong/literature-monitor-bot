@@ -414,6 +414,15 @@ def main() -> int:
                            bool(args.quota_hit), len(papers))
     if args.notice.strip():
         header += f"\n⚠️ {args.notice.strip()}"
+    # Self-check line: on a genuinely empty result with NO failure signal
+    # (no quota hit, no fetch/coverage notice), state explicitly that the run
+    # was healthy — so a real quiet day is distinguishable at a glance from a
+    # silent failure (which instead shows a ⚠️ banner above).
+    degraded = bool(args.quota_hit) or bool(args.notice.strip())
+    if len(papers) == 0 and not degraded:
+        header += ("\n✅ 自检正常：抓取 / 筛选 / 判读均成功完成"
+                   f"（扫描 {args.scanned} 篇 → 判读 {len(all_papers)} 篇 → 命中 0），"
+                   "确为「真·无相关文献」，非故障。")
     payloads = build_payloads(header, papers)
 
     if args.dry_run:
