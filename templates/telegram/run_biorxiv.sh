@@ -55,12 +55,35 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot biorxiv run FAILED (
   FETCH_NOTICE=""
   if [ "$FETCH_EXIT" -ne 0 ]; then
     # Fetch crashed (bioRxiv API down after retries). Do NOT present this as a
-    # quiet day — push a ⚠️ banner and skip the LLM. Papers are re-fetched on the
-    # next cron (nothing was cached), so no loss.
+    # quiet day — push a ⚠️ banner and skip the LLM. Papers are re-fetched later
+    # (nothing was cached), so no loss.
     : > "$CAND"
-    FETCH_NOTICE="bioRxiv API 抓取失败（exit ${FETCH_EXIT}：504/超时/JSON），本次未扫，下次 cron 自动重试"
     echo "[run] FETCH FAILED (exit ${FETCH_EXIT}) — pushing warning, skipping LLM"
-    alert "⚠️ lit-bot: bioRxiv fetch FAILED (exit ${FETCH_EXIT}) @ $(date -Iseconds). Retry next cron."
+    # Self-healing auto-retry: bioRxiv's API outages are usually transient
+    # (minutes–an hour). Rather than wait ~12h for the next cron, schedule a
+    # delayed retry via `sbatch --begin`. LIT_FETCH_RETRY is a counter carried
+    # into the retry job so it can't loop forever; a retry that succeeds just
+    # completes normally. Tunables: LIT_MAX_FETCH_RETRY (default 2),
+    # LIT_FETCH_RETRY_DELAY_MIN (default 30).
+    FETCH_RETRY="${LIT_FETCH_RETRY:-0}"
+    MAX_FETCH_RETRY="${LIT_MAX_FETCH_RETRY:-2}"
+    RETRY_DELAY_MIN="${LIT_FETCH_RETRY_DELAY_MIN:-30}"
+    if [ "$FETCH_RETRY" -ge "$MAX_FETCH_RETRY" ]; then
+      FETCH_NOTICE="bioRxiv API 抓取失败（exit ${FETCH_EXIT}）；已连续自动重试 ${FETCH_RETRY} 次仍失败，等下一趟 cron"
+      echo "[run] auto-retry cap reached (${FETCH_RETRY}/${MAX_FETCH_RETRY})"
+      alert "⚠️ lit-bot: bioRxiv fetch FAILED; auto-retry cap (${FETCH_RETRY}) reached, waiting for next cron."
+    elif command -v sbatch >/dev/null 2>&1 && \
+         sbatch --begin="now+${RETRY_DELAY_MIN}minutes" \
+                --export=ALL,LIT_FETCH_RETRY=$((FETCH_RETRY+1)),LIT_BIORXIV_DAYS=${LIT_BIORXIV_DAYS:-2} \
+                "$ROOT/telegram/run_biorxiv.sbatch" >/dev/null 2>&1; then
+      FETCH_NOTICE="bioRxiv API 抓取失败（exit ${FETCH_EXIT}）；已安排 ${RETRY_DELAY_MIN} 分钟后自动重试（第 $((FETCH_RETRY+1))/${MAX_FETCH_RETRY} 次）"
+      echo "[run] scheduled auto-retry #$((FETCH_RETRY+1)) in ${RETRY_DELAY_MIN}min via sbatch --begin"
+      alert "⚠️ lit-bot: bioRxiv fetch FAILED (exit ${FETCH_EXIT}) @ $(date -Iseconds); auto-retry #$((FETCH_RETRY+1)) in ${RETRY_DELAY_MIN}min."
+    else
+      FETCH_NOTICE="bioRxiv API 抓取失败（exit ${FETCH_EXIT}）；自动重试调度失败，等下一趟 cron"
+      echo "[run] could not schedule auto-retry (sbatch unavailable?)"
+      alert "⚠️ lit-bot: bioRxiv fetch FAILED (exit ${FETCH_EXIT}) @ $(date -Iseconds); could not schedule auto-retry, waiting for next cron."
+    fi
   fi
   N_CAND=$(wc -l < "$CAND" | tr -d ' ')
   SCANNED=$(grep -oE 'stats=\{[^}]*\}' "$STDERR_FETCH" | head -1 \
