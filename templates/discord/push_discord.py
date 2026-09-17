@@ -39,11 +39,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Reuse the Telegram pusher's compact author formatter so the two channels stay
-# in lockstep (first 8 + '...' + a tail that always contains the corresponding
-# authors). Import instead of duplicating so it can't drift.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from push_telegram import _format_authors_with_corresponding  # noqa: E402
+# Compact author formatter lives in the shared scripts/ folder so both channel
+# pushers render author lists identically and can't drift (first 8 + '...' + a
+# tail that always contains the corresponding authors).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from authorfmt import _format_authors_with_corresponding  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DIGEST_DIR = ROOT / "digests"
