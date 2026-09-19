@@ -234,7 +234,10 @@ genuine **v2** of an already-pushed v1 re-pushes once (an update, not a dup).
 If `logs/cron-*.log` shows "Submitted batch job N" but there's no run log and no
 push, the job is stuck **PENDING** (partition saturated). Check `squeue -j N`.
 Pick a partition you have **priority** on; the job is tiny (**1 CPU, 2 GB, 1 h**).
-A SLURM association may pin a single partition (no multi-partition fallback list).
+A SLURM association pins a single partition per account, so a queued job can't move
+itself — instead set up **`config/partitions.txt`** and the cron submitter (and the
+auto-retry) pick a partition with free capacity **at submit time**, falling back off a
+saturated priority partition. See **[docs/hpc-partition-fallback.md](docs/hpc-partition-fallback.md)**.
 
 ### Cost / token discipline (non-negotiable)
 - **Batch every LLM call**: title triage = 1 call for all titles; abstract judge =

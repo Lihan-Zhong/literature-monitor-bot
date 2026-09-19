@@ -11,6 +11,7 @@ state/discord_webhook.txt
 config/telegram.env
 config/research_focus.txt
 config/keywords.txt
+config/partitions.txt
 
 # Runtime state, caches, logs, fetched papers/figures.
 state/

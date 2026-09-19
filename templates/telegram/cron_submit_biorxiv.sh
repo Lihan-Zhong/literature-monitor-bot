@@ -10,6 +10,15 @@ LOG="$ROOT/logs/cron-biorxiv.log"
 mkdir -p "$(dirname "$LOG")"
 {
     echo "===== cron submit @ $(date -Iseconds) ====="
-    /usr/bin/sbatch "$ROOT/telegram/run_biorxiv.sbatch"
+    # Prefer a partition with free capacity NOW (see config/partitions.txt) so the
+    # job doesn't sit PENDING when your priority partition is full. If that file
+    # isn't configured, fall back to the partition baked into the .sbatch file.
+    if [ -f "$ROOT/config/partitions.txt" ] && [ -x "$ROOT/scripts/pick_partition.sh" ]; then
+        read -r PART ACCT _ < <("$ROOT/scripts/pick_partition.sh")
+        echo "[cron] selected partition=$PART account=$ACCT"
+        /usr/bin/sbatch --partition="$PART" --account="$ACCT" "$ROOT/telegram/run_biorxiv.sbatch"
+    else
+        /usr/bin/sbatch "$ROOT/telegram/run_biorxiv.sbatch"
+    fi
     echo
 } >> "$LOG" 2>&1

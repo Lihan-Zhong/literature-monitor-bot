@@ -1,0 +1,12 @@
+# Candidate SLURM partitions for the scan job, HIGHEST PRIORITY FIRST.
+# One "<partition> <account>" per line. At submit time the bot picks the first
+# partition here that currently has a free CPU (so the job runs promptly instead
+# of sitting PENDING when your priority partition is full); if none are idle it
+# uses the first line. The account MUST match the partition — a SLURM association
+# pins one partition per account.
+#
+# Copy this to config/partitions.txt and edit for your cluster. Example shape:
+#   my_priority_partition   my_priority_account     # small/fast, preferred
+#   my_big_fallback         my_fallback_account     # large, usually idle
+#   my_bigmem_fallback      my_fallback_account
+YOUR_PARTITION   YOUR_ACCOUNT

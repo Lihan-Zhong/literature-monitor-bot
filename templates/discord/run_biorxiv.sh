@@ -68,12 +68,19 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot biorxiv run FAILED (
     FETCH_RETRY="${LIT_FETCH_RETRY:-0}"
     MAX_FETCH_RETRY="${LIT_MAX_FETCH_RETRY:-2}"
     RETRY_DELAY_MIN="${LIT_FETCH_RETRY_DELAY_MIN:-30}"
+    # Pick a partition with free capacity for the retry too (if config/partitions.txt
+    # is set up) so the retry itself doesn't sit PENDING.
+    PART_OPT=""
+    if [ -f "$ROOT/config/partitions.txt" ] && [ -x "$ROOT/scripts/pick_partition.sh" ]; then
+      _pp=$("$ROOT/scripts/pick_partition.sh" 2>/dev/null || true)
+      [ -n "$_pp" ] && { read -r _p _a _ <<< "$_pp"; [ -n "$_p" ] && PART_OPT="--partition=$_p --account=$_a"; }
+    fi
     if [ "$FETCH_RETRY" -ge "$MAX_FETCH_RETRY" ]; then
       FETCH_NOTICE="bioRxiv API 抓取失败（exit ${FETCH_EXIT}）；已连续自动重试 ${FETCH_RETRY} 次仍失败，等下一趟 cron"
       echo "[run] auto-retry cap reached (${FETCH_RETRY}/${MAX_FETCH_RETRY})"
       alert "⚠️ lit-bot: bioRxiv fetch FAILED; auto-retry cap (${FETCH_RETRY}) reached, waiting for next cron."
     elif command -v sbatch >/dev/null 2>&1 && \
-         sbatch --begin="now+${RETRY_DELAY_MIN}minutes" \
+         sbatch --begin="now+${RETRY_DELAY_MIN}minutes" $PART_OPT \
                 --export=ALL,LIT_FETCH_RETRY=$((FETCH_RETRY+1)),LIT_BIORXIV_DAYS=${LIT_BIORXIV_DAYS:-2} \
                 "$ROOT/discord/run_biorxiv.sbatch" >/dev/null 2>&1; then
       FETCH_NOTICE="bioRxiv API 抓取失败（exit ${FETCH_EXIT}）；已安排 ${RETRY_DELAY_MIN} 分钟后自动重试（第 $((FETCH_RETRY+1))/${MAX_FETCH_RETRY} 次）"
