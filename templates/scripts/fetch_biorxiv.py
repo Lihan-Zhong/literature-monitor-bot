@@ -3,8 +3,16 @@
 Fetch new bioRxiv preprints, dedupe against cache, apply keyword pre-filter,
 emit candidate papers as JSONL on stdout.
 
+Source = **Crossref** (bioRxiv's DOI registrar). The old api.biorxiv.org JSON
+API broke in bioRxiv's 2026-09 site redesign — it now returns HTTP 200 with an
+empty body for every query — and bioRxiv moved new preprints from DOI prefix
+10.1101 to **10.64898**. Crossref exposes DOI, title, abstract, category
+(group-title), posted date and authors for the new prefix, and is far more
+reliable, so we query it instead. The record shape below is unchanged, so the
+downstream triage/judge/push stages are untouched.
+
 Usage:
-    fetch_biorxiv.py [--days N] [--server biorxiv|medrxiv]
+    fetch_biorxiv.py [--days N] [--from YYYY-MM-DD --to YYYY-MM-DD]
 
 Output: one JSON object per line with fields:
     doi, version, title, authors, abstract, date, category,
@@ -18,15 +26,26 @@ import sqlite3
 import sys
 import time
 from datetime import date, timedelta
+from html import unescape
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS_FILE = ROOT / "config" / "keywords.txt"
 CATEGORIES_FILE = ROOT / "config" / "categories.txt"
 CACHE_DB = ROOT / "cache" / "seen.sqlite"
-USER_AGENT = "lit-bot/1.0 (you@example.com)"
+
+CONTACT_EMAIL = "you@example.com"                   # Crossref polite-pool contact
+USER_AGENT = f"lit-bot/1.0 (mailto:{CONTACT_EMAIL})"
+
+# bioRxiv's DOI prefix since the 2026-09 migration (older preprints used 10.1101,
+# which no longer receives new posts). Crossref prefix 10.64898 also carries
+# medRxiv preprints, but the category whitelist (config/categories.txt) keeps only
+# the bioRxiv subjects, so mixing is harmless.
+BIORXIV_PREFIX = "10.64898"
+CROSSREF_WORKS = "https://api.crossref.org/prefixes/{prefix}/works"
 
 
 def load_lines(path: Path) -> list[str]:
@@ -61,48 +80,108 @@ def init_cache(db: Path) -> sqlite3.Connection:
     return con
 
 
-def fetch_page(server: str, frm: str, to: str, cursor: int, max_retries: int = 5) -> dict:
-    """Fetch one page from api.biorxiv.org with robust retries. The API
-    intermittently returns 504 Gateway Timeout, times out on read, or serves a
-    non-JSON error page (JSONDecodeError) — ALL transient. Retry with backoff and
-    only raise once every attempt fails. (Catching OSError covers socket.timeout;
-    ValueError covers json.JSONDecodeError.)"""
-    url = f"https://api.biorxiv.org/details/{server}/{frm}/{to}/{cursor}"
+# ---------------------------------------------------------------------------
+# Crossref source
+# ---------------------------------------------------------------------------
+def _strip_jats(text: str) -> str:
+    """Crossref abstracts are JATS-XML wrapped (<jats:title>Abstract</jats:title>
+    <jats:p>…</jats:p>). Strip tags, unescape entities, drop a leading 'Abstract'."""
+    if not text:
+        return ""
+    text = re.sub(r"</?jats:[^>]*>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text)
+    text = re.sub(r"^\s*abstract\b[:.]?\s*", "", text, flags=re.I)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _fmt_author(a: dict) -> str:
+    """Crossref author {family, given} → 'Family, G.' (matches the old API's
+    author-string style so the downstream author formatter is unchanged)."""
+    fam = (a.get("family") or "").strip()
+    giv = (a.get("given") or "").strip()
+    if not fam:
+        return (a.get("name") or "").strip()
+    initials = "".join(p[0] for p in re.split(r"[\s\-]+", giv) if p)
+    return (f"{fam}, {initials}".strip().rstrip(",")).strip()
+
+
+def _crossref_get(prefix: str, frm: str, to: str, cursor: str,
+                  max_retries: int = 5) -> dict:
+    """One Crossref page with robust retries (transient HTTP/network/JSON errors).
+    OSError covers socket.timeout; ValueError covers json.JSONDecodeError."""
+    params = {
+        "filter": f"from-posted-date:{frm},until-posted-date:{to}",
+        "rows": "1000",
+        "cursor": cursor,
+        "select": "DOI,title,abstract,group-title,posted,author",
+        "mailto": CONTACT_EMAIL,
+    }
+    url = CROSSREF_WORKS.format(prefix=prefix) + "?" + urlencode(params)
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
             req = Request(url, headers={"User-Agent": USER_AGENT})
             with urlopen(req, timeout=90) as r:
-                raw = r.read()
-            return json.loads(raw)
+                return json.loads(r.read())
         except (HTTPError, URLError, OSError, ValueError) as e:
             last_err = e
             wait = min(8 * attempt, 40)
-            print(f"[fetch_biorxiv] page cursor={cursor} attempt {attempt}/{max_retries} "
-                  f"failed: {type(e).__name__}: {str(e)[:120]}; "
+            print(f"[fetch_biorxiv] Crossref attempt {attempt}/{max_retries} failed: "
+                  f"{type(e).__name__}: {str(e)[:120]}; "
                   f"{'retry in %ds' % wait if attempt < max_retries else 'giving up'}",
                   file=sys.stderr)
             if attempt < max_retries:
                 time.sleep(wait)
     raise RuntimeError(
-        f"biorxiv API fetch failed after {max_retries} attempts (cursor={cursor}): "
+        f"Crossref fetch failed after {max_retries} attempts: "
         f"{type(last_err).__name__}: {last_err}")
 
 
 def fetch_all(server: str, frm: str, to: str) -> list[dict]:
-    papers = []
-    cursor = 0
+    """All bioRxiv preprints posted in [frm, to], from Crossref, as internal
+    records (doi/version/title/abstract/date/category/authors) — same shape the
+    old api.biorxiv.org path produced, so main() below is unchanged."""
+    out: list[dict] = []
+    cursor = "*"
     while True:
-        data = fetch_page(server, frm, to, cursor)  # retries internally; raises if all fail
-        msg = data.get("messages", [{}])[0]
-        batch = data.get("collection", [])
-        papers.extend(batch)
-        total = int(msg.get("total", 0))
-        cursor += len(batch)
-        if cursor >= total or not batch:
+        data = _crossref_get(BIORXIV_PREFIX, frm, to, cursor)
+        msg = data.get("message", {})
+        items = msg.get("items", [])
+        if not items:
             break
-        time.sleep(0.3)
-    return papers
+        for it in items:
+            doi = (it.get("DOI") or "").strip().lower()
+            if not doi:
+                continue
+            title = " ".join(t for t in (it.get("title") or []) if t).strip()
+            dp = (it.get("posted") or {}).get("date-parts") or [[]]
+            parts = dp[0] if dp and dp[0] else []
+            if len(parts) >= 3:
+                date_str = f"{parts[0]:04d}-{parts[1]:02d}-{parts[2]:02d}"
+            elif parts:
+                date_str = "-".join(str(p) for p in parts)
+            else:
+                date_str = ""
+            authors = "; ".join(
+                _fmt_author(a) for a in (it.get("author") or [])
+                if (a.get("family") or a.get("name")))
+            out.append({
+                "doi": doi,
+                "version": "1",  # Crossref exposes the base DOI; versions rare
+                "title": title,
+                "abstract": _strip_jats(it.get("abstract") or ""),
+                "date": date_str,
+                "category": (it.get("group-title") or "").strip(),
+                "authors": authors,
+                "author_corresponding": "",
+                "author_corresponding_institution": "",
+            })
+        cursor = msg.get("next-cursor")
+        if not cursor:
+            break
+        time.sleep(0.5)  # polite to Crossref
+    return out
 
 
 def keyword_match(text: str, keywords: list[str]) -> list[str]:
@@ -139,12 +218,12 @@ def main():
     ap.add_argument("--days", type=int, default=2,
                     help="Lookback window in days (default 2; cache handles dedup)")
     ap.add_argument("--from", dest="frm", default="",
-                    help="explicit start date YYYY-MM-DD (overrides --days). Use "
-                         "SMALL windows for backfills — the details API 504s on "
-                         "big date ranges; a few-day window is fast and reliable.")
+                    help="explicit start date YYYY-MM-DD (overrides --days)")
     ap.add_argument("--to", dest="to", default="",
                     help="explicit end date YYYY-MM-DD (default: today)")
-    ap.add_argument("--server", default="biorxiv", choices=["biorxiv", "medrxiv"])
+    ap.add_argument("--server", default="biorxiv", choices=["biorxiv", "medrxiv"],
+                    help="label only; Crossref prefix 10.64898 covers bioRxiv "
+                         "(medRxiv rows are dropped by the category whitelist)")
     args = ap.parse_args()
 
     keywords = load_lines(KEYWORDS_FILE)
@@ -158,14 +237,17 @@ def main():
     today = date.today()
     frm = args.frm or (today - timedelta(days=args.days)).isoformat()
     to = args.to or today.isoformat()
-    print(f"[fetch_biorxiv] querying {args.server} {frm} -> {to}", file=sys.stderr)
+    # NB: keep this log line's "querying biorxiv <from> -> <to>" shape — run_biorxiv.sh
+    # greps it to extract the window shown in the digest header.
+    print(f"[fetch_biorxiv] querying biorxiv {frm} -> {to} (via Crossref {BIORXIV_PREFIX})",
+          file=sys.stderr)
 
     try:
         papers = fetch_all(args.server, frm, to)
     except Exception as e:
-        # Total fetch failure (API down after all retries). Exit 17 with a
-        # distinct marker so run_biorxiv.sh flags it as a FETCH failure and
-        # pushes a ⚠️ banner instead of a fake-empty "no papers" digest.
+        # Total fetch failure (Crossref down after all retries). Exit 17 with a
+        # distinct marker so run_biorxiv.sh flags it as a FETCH failure and pushes
+        # a ⚠️ banner (+ schedules the auto-retry) instead of a fake-empty digest.
         print(f"__FETCH_FAILED__ {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
         sys.exit(17)
     print(f"[fetch_biorxiv] received {len(papers)} records", file=sys.stderr)

@@ -67,7 +67,7 @@ Closing your laptop / signing out never affects the scheduled runs.
 
 | File | Role |
 |---|---|
-| `fetch_biorxiv.py` | bioRxiv details API → category whitelist → keyword filter → candidate JSONL. `--days N` or `--from/--to YYYY-MM-DD`. Robust retry. |
+| `fetch_biorxiv.py` | **Crossref** (bioRxiv DOI prefix `10.64898`) → category whitelist → keyword filter → candidate JSONL. `--days N` or `--from/--to YYYY-MM-DD`. Robust retry. |
 | `fetch_journals.py` | NCBI E-utilities (esearch/efetch by ISSN) → drop corrections/editorials → **abstract backfill (Crossref/EuropePMC)** → keyword filter. |
 | `fetch_vita.py` | OAI-PMH harvester for a journal NOT in PubMed (example: Vita). Same candidate schema. |
 | `triage_titles.py` | Stage 2 — one batched `claude -p` call, yes/maybe/no per title. |
@@ -216,14 +216,17 @@ digest footer shows "摘要判读得 N" (N ≥ 0). A failure shows a ⚠️ bann
 | `claude exit 1`, empty stderr | weekly quota exhausted | triage/judge exit 42 on ANY non-zero claude exit (not just keyword match) → ⚠️ |
 | `529 Overloaded` | transient Anthropic server overload | same exit-42 path; retries next cron |
 | `OAuth session expired…` | stored OAuth expired | user runs `/login` to refresh, then re-run |
-| `504 Gateway Timeout` / `socket.timeout` / `JSONDecodeError` + `candidates=0 scanned=0` | **bioRxiv API flaky** | `fetch_page` retries 5× (catches HTTPError/URLError/**OSError**/**ValueError** — the socket-timeout + JSON errors the naive catch missed); wrapper checks fetch exit code → ⚠️ banner |
+| network / HTTP / `JSONDecodeError` from Crossref + `candidates=0 scanned=0` | **fetch source down** | `_crossref_get` retries 5× (catches HTTPError/URLError/**OSError**/**ValueError**); `main()` exits 17; wrapper checks the fetch exit code → ⚠️ banner (+ schedules the auto-retry) |
 
-### bioRxiv API 504s on BIG date windows — backfill in SMALL chunks
-The details API times out on large ranges. A month-long backfill (e.g. `--days 33`)
-can hit a 504-storm and crawl for hours; a 2-4 day window fetches in seconds. Use
-targeted windows: `fetch_biorxiv.py --from YYYY-MM-DD --to YYYY-MM-DD` (wired as
-`LIT_BIORXIV_FROM` / `LIT_BIORXIV_TO` in `run_biorxiv.sh`). The daily cron already
-uses a small `--days 2` window and is fine.
+### The bioRxiv data source (why Crossref, not api.biorxiv.org)
+bioRxiv's own JSON API (`api.biorxiv.org/details/…`) broke in their **2026-09 site
+redesign** — it now returns `HTTP 200` with an **empty body** for every query — and new
+preprints moved to **DOI prefix `10.64898`** (was `10.1101`). So `fetch_biorxiv.py` sources
+from **Crossref** (`api.crossref.org/prefixes/10.64898/works`, filtered by posted date),
+which carries DOI / title / abstract / category (`group-title`, matched against the whitelist)
+/ authors and is far more reliable. Crossref deep-pages large ranges fine (no 504-storm), so
+`--from/--to YYYY-MM-DD` backfills of any size are OK. If bioRxiv fixes/changes their API
+again, only `fetch_all` / `_crossref_get` need touching — the record shape downstream is fixed.
 
 ### No duplicate pushes
 Dedup is by `(doi, version)` in `cache/seen.sqlite`; already-pushed papers are
