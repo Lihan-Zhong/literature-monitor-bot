@@ -162,11 +162,18 @@ def parse_score(value: Any) -> int:
 # rendering
 # --------------------------------------------------------------------------- #
 def render_header(source: str, now_str: str, window, footer: str,
-                  quota_hit: bool, n_hits: int) -> str:
+                  quota_hit: bool, n_hits: int, quota_reason: str = "") -> str:
     lines = [f"## 📚 {source} · {now_str}"]
     if quota_hit:
-        lines.append("⚠️ **本次运行 Claude 调用失败（额度耗尽或临时错误）**，"
-                     "未判完的下次 cron 自动续跑（本次未推的论文不会入库、下次会重扫）")
+        if quota_reason == "oauth":
+            lines.append("⚠️ **Claude OAuth 会话过期** —— 请在问答频道 `/login` 刷新登录，"
+                         "然后让我重跑本次（未判读的论文不会入库、不会丢）")
+        elif quota_reason == "quota":
+            lines.append("⚠️ **Claude 额度耗尽** —— 未判完的下次 cron 自动续跑"
+                         "（本次未推的论文不会入库、下次会重扫）")
+        else:
+            lines.append("⚠️ **本次运行 Claude 调用失败（临时错误，如 529 过载）**，"
+                         "未判完的下次 cron 自动续跑（本次未推的论文不会入库、下次会重扫）")
     lines.append(f"窗口: {window[0]} → {window[1]}")
     lines.append(f"命中 {n_hits} 篇相关文献" if n_hits else "今日无相关文献")
     lines.append(footer)
@@ -345,6 +352,8 @@ def main() -> int:
     ap.add_argument("--keyword-pass", type=int, default=0)
     ap.add_argument("--triage-pass", type=int, default=0)
     ap.add_argument("--quota-hit", type=int, default=0)
+    ap.add_argument("--quota-reason", default="",
+                    help="oauth|quota|overload — picks a specific banner when --quota-hit")
     ap.add_argument("--window-from", default="")
     ap.add_argument("--window-to", default="")
     ap.add_argument("--min-score", type=int, default=3)
@@ -411,7 +420,7 @@ def main() -> int:
         "quota_hit": bool(args.quota_hit),
     }
     header = render_header(args.source, now_str, window, footer,
-                           bool(args.quota_hit), len(papers))
+                           bool(args.quota_hit), len(papers), args.quota_reason)
     if args.notice.strip():
         header += f"\n⚠️ {args.notice.strip()}"
     # Self-check line: on a genuinely empty result with NO failure signal

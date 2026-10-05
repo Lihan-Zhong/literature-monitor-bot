@@ -33,6 +33,19 @@ alert() {
     "$PY" "$ROOT/telegram/push_telegram.py" --text "⚠️ $msg" > /dev/null 2>&1 || true
 }
 
+# Classify an LLM-stage stderr -> oauth|quota|overload (or empty) so the pusher
+# shows a SPECIFIC warning banner (e.g. OAuth expired -> run /login) not a generic one.
+classify_llm_fail() {
+    local f="$1"
+    if grep -qiE "OAuth session expired|Failed to authenticate|could not be refreshed" "$f" 2>/dev/null; then
+        echo oauth
+    elif grep -qiE "usage limit|quota|rate.?limit|5-hour|weekly|session (window|limit)|429" "$f" 2>/dev/null; then
+        echo quota
+    elif grep -qiE "Overloaded|529" "$f" 2>/dev/null; then
+        echo overload
+    fi
+}
+
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot journals run FAILED (exit $rc) at $(date -Iseconds). Check $LOG"; fi' EXIT
 
 {
@@ -59,6 +72,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot journals run FAILED 
     [ -n "$COV_WARN" ] && echo "[run] coverage_warning: $COV_WARN"
 
     QUOTA_HIT=0
+    QUOTA_REASON=""
 
     # Stage 2: title triage.
     if [ "$N_CAND" -gt 0 ]; then
@@ -68,6 +82,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot journals run FAILED 
         cat "$TMP_DIR/journals-triage-$STAMP.stderr"
         if [ "$TRIAGE_EXIT" -eq 42 ]; then
             QUOTA_HIT=1
+            QUOTA_REASON=$(classify_llm_fail "$TMP_DIR/journals-triage-$STAMP.stderr")
             alert "⚠️ lit-bot journals: quota at Stage 2 @ $(date -Iseconds)."
             : > "$JUDGED"
         fi
@@ -86,6 +101,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot journals run FAILED 
         cat "$TMP_DIR/journals-judge-$STAMP.stderr"
         if [ "$JUDGE_EXIT" -eq 42 ]; then
             QUOTA_HIT=1
+            QUOTA_REASON=$(classify_llm_fail "$TMP_DIR/journals-judge-$STAMP.stderr")
             alert "⚠️ lit-bot journals: quota at Stage 3 @ $(date -Iseconds)."
         fi
         N_JUDGED=$(wc -l < "$JUDGED" | tr -d ' ')
@@ -101,6 +117,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot journals run FAILED 
           --keyword-pass "$N_CAND" \
           --triage-pass "$N_TRIAGED" \
           --quota-hit "$QUOTA_HIT" \
+          --quota-reason "${QUOTA_REASON:-}" \
           --window-from "$WIN_FROM" \
           --window-to "$WIN_TO" \
           --notice "${COV_WARN:-}" \

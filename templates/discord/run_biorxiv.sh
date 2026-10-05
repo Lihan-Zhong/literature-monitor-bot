@@ -34,6 +34,19 @@ alert() {
     "$PY" "$ROOT/discord/push_discord.py" --text "⚠️ $msg" > /dev/null 2>&1 || true
 }
 
+# Classify an LLM-stage stderr -> oauth|quota|overload (or empty) so the pusher
+# shows a SPECIFIC warning banner (e.g. OAuth expired -> run /login) not a generic one.
+classify_llm_fail() {
+    local f="$1"
+    if grep -qiE "OAuth session expired|Failed to authenticate|could not be refreshed" "$f" 2>/dev/null; then
+        echo oauth
+    elif grep -qiE "usage limit|quota|rate.?limit|5-hour|weekly|session (window|limit)|429" "$f" 2>/dev/null; then
+        echo quota
+    elif grep -qiE "Overloaded|529" "$f" 2>/dev/null; then
+        echo overload
+    fi
+}
+
 # Trap any unexpected exit and notify the user.
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot biorxiv run FAILED (exit $rc) at $(date -Iseconds). Check $LOG"; fi' EXIT
 
@@ -104,6 +117,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot biorxiv run FAILED (
 
   TRIAGED="$TMP_DIR/triaged-$STAMP.jsonl"
   QUOTA_HIT=0
+  QUOTA_REASON=""
 
   # 2) Stage-2 title triage (one batched LLM call, ~3K tokens for ~50 titles).
   if [ "$N_CAND" -gt 0 ]; then
@@ -113,6 +127,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot biorxiv run FAILED (
     cat "$TMP_DIR/triage-$STAMP.stderr"
     if [ "$TRIAGE_EXIT" -eq 42 ]; then
       QUOTA_HIT=1
+      QUOTA_REASON=$(classify_llm_fail "$TMP_DIR/triage-$STAMP.stderr")
       echo "[run] quota exhausted in triage; bailing"
       alert "⚠️ lit-bot: quota exhausted at Stage 2 (triage) @ $(date -Iseconds). Will retry on next cron."
       : > "$JUDGED"
@@ -133,6 +148,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot biorxiv run FAILED (
     cat "$TMP_DIR/judge-$STAMP.stderr"
     if [ "$JUDGE_EXIT" -eq 42 ]; then
       QUOTA_HIT=1
+      QUOTA_REASON=$(classify_llm_fail "$TMP_DIR/judge-$STAMP.stderr")
       echo "[run] quota exhausted in judge; pushing what we have"
       alert "⚠️ lit-bot: quota exhausted at Stage 3 (judge) @ $(date -Iseconds). Already-judged papers pushed; rest retry next cron."
     fi
@@ -150,6 +166,7 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then alert "⚠️ lit-bot biorxiv run FAILED (
         --keyword-pass "$N_CAND" \
         --triage-pass "$N_TRIAGED" \
         --quota-hit "$QUOTA_HIT" \
+        --quota-reason "${QUOTA_REASON:-}" \
         --window-from "$WIN_FROM" \
         --window-to "$WIN_TO" \
         --notice "${FETCH_NOTICE:-}" \

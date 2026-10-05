@@ -204,7 +204,9 @@ def main():
     ap.add_argument("--triage-pass", type=int, default=0,
                     help="Candidates passing Stage-2 title triage (yes+maybe)")
     ap.add_argument("--quota-hit", type=int, default=0,
-                    help="1 if any stage hit Claude quota; show banner")
+                    help="1 if any stage hit a Claude failure; show banner")
+    ap.add_argument("--quota-reason", default="",
+                    help="oauth|quota|overload — picks a specific banner when --quota-hit")
     ap.add_argument("--window-from", default="")
     ap.add_argument("--window-to", default="")
     ap.add_argument("--min-score", type=int, default=3)
@@ -246,8 +248,16 @@ def main():
                      f"标题 triage 留 {args.triage_pass} → "
                      f"摘要判读得 {len(all_papers)} → "
                      f"score≥{args.min_score} 留 {len(papers)}")
-    quota_banner = "\n⚠️ <b>本次运行 Claude quota 中途耗尽</b>，未判完的下次 cron 自动续跑\n" \
-                   if args.quota_hit else ""
+    if not args.quota_hit:
+        quota_banner = ""
+    elif args.quota_reason == "oauth":
+        quota_banner = ("\n⚠️ <b>Claude OAuth 会话过期</b> —— 请 /login 刷新登录后让我重跑"
+                        "（未判读的不入库、不会丢）\n")
+    elif args.quota_reason == "quota":
+        quota_banner = "\n⚠️ <b>Claude 额度耗尽</b> —— 未判完的下次 cron 自动续跑\n"
+    else:
+        quota_banner = ("\n⚠️ <b>本次运行 Claude 调用失败（临时错误，如 529 过载）</b>，"
+                        "未判完的下次 cron 自动续跑\n")
     notice_banner = f"\n⚠️ {html_escape(args.notice)}\n" if args.notice else ""
 
     if not papers:
