@@ -234,18 +234,22 @@ recovers **without one call per paper**:
    little for a classifier to trip on); bisect only if that fails too; then ONE full call
    for the papers that scored ≥ 3, to get their summaries (if that fails, the card says
    「仅打分模式」).
-3. **Backup model** — `claude -p --fallback-model sonnet` lets the CLI re-answer a turn
-   the main model refuses or cannot serve, inside the same call (env
-   `LIT_JUDGE_FALLBACK_MODEL`; `""` disables it; such cards say 「Sonnet 备用模型打分」).
-   It only helps when the CLI's own retry is refused too; when the model merely declines
-   to regenerate, steps 1–2 do the work.
+3. **Backup model for a refused paper** — a single paper the classifier still refuses
+   after the score-only retry gets ONE full call with `--model sonnet` (env
+   `LIT_JUDGE_RESCUE_MODEL`; `""` disables it; its card says 「Sonnet 备用模型打分」). It
+   fires only on refusal evidence, including the exit-0 shape where the model apologises
+   after a stop, and never on a plain parse failure, so a systematic failure cannot turn
+   into one call per paper. `--fallback-model sonnet` (env `LIT_JUDGE_FALLBACK_MODEL`) is
+   also passed, but it only covers a busy/unavailable main model: with it on, refused calls
+   still log `model_refusal_no_fallback`.
 
 A classifier refusal is **not** treated as quota (that would skip the recovery and show a
 false quota banner). `push_discord.py` keeps papers that still could not be scored **out
 of** `seen.sqlite` (retried next cron), lists them under a ⚠️ line with links, and after 2
 failed runs (`cache/judge_failures.json`) caches them as score −1 for a manual look. A run
 with such papers never shows 「✅ 自检正常」. Typical cost: a stopped batch → 2–3 calls; a
-paper that always trips the classifier → about log₂(batch) extra score-only calls.
+paper that always trips the classifier → about log₂(batch) extra score-only calls plus
+one rescue call.
 Offline tests (no LLM call, no network): `bash tests/run_all.sh`.
 
 ### The bioRxiv data source (why Crossref, not api.biorxiv.org)

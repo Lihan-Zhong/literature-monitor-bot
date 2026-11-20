@@ -114,6 +114,29 @@ except Exception as e:  # noqa: BLE001
 good = got == "PartialReply items=1 cut_at=1"
 fails += not good
 print(f"{'PASS' if good else 'FAIL'} {'refusal_after_partial':21s} -> {got}")
+# Exit 0, but the model was stopped at the start and then only apologised:
+# nothing reusable -> judge_batch raises ClassifierRefusal (not ValueError),
+# so the rescue rung can fire for it.
+STOP = {"type": "assistant", "session_id": SID,
+        "message": {"role": "assistant", "stop_reason": "refusal",
+                    "content": [{"type": "text", "text": '[{"'}]}}
+SORRY = ("My previous answer was cut off by a safety check, so I won't "
+         "regenerate it.")
+SORRY_MSG = {"type": "assistant", "session_id": SID,
+             "message": {"role": "assistant", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": SORRY}]}}
+llm_judge.subprocess.run = (lambda *a, **k: subprocess.CompletedProcess(
+    a, 0, J(INIT, RL_OK, STOP, SORRY_MSG, result(SORRY, False)), ""))
+try:
+    llm_judge.judge_batch(recs, 1)
+    got = "no exception"
+except Exception as e:  # noqa: BLE001
+    got = type(e).__name__
+good = got == "ClassifierRefusal"
+fails += not good
+print(f"{'PASS' if good else 'FAIL'} {'apology_after_stop':21s} -> {got}")
+llm_judge.subprocess.run = (lambda *a, **k: subprocess.CompletedProcess(
+    a, 1, J(INIT, RL_OK, CUT, SYN, result(API_ERR, True)), ""))
 # A refused score-only call -> ClassifierRefusal propagates (bisection handles it).
 try:
     llm_judge.judge_batch(recs, 1, score_only=True)

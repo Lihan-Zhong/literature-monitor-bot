@@ -80,7 +80,20 @@ llm_judge.FALLBACK_MODEL = ""
 llm_judge.call_claude("x")
 check("disabled -> no flag", "--fallback-model" not in seen_cmds[-1], str(seen_cmds[-1]))
 
-# 4. card note
+# 4. explicit model (the rescue rung): --model sonnet, no duplicate
+#    --fallback-model sonnet, records tagged with the answering model
+llm_judge.FALLBACK_MODEL = "sonnet"
+llm_judge.subprocess.run = fake(J({**INIT, "model": "claude-sonnet-5-5"},
+                                  answer("claude-sonnet-5-5"), RESULT))
+out = llm_judge.judge_batch(recs, 1, model="sonnet")
+cmd = seen_cmds[-1]
+check("explicit --model sonnet",
+      "--model" in cmd and cmd[cmd.index("--model") + 1] == "sonnet", str(cmd[-4:]))
+check("no duplicate fallback flag", "--fallback-model" not in cmd, str(cmd[-4:]))
+check("rescue records tagged", [o.get("judge_model") for o in out] == ["claude-sonnet-5-5"] * 2,
+      str([o.get("judge_model") for o in out]))
+
+# 5. card note
 p = {"title": "t", "score": 4, "summary_zh": "s", "category": "genomics"}
 
 

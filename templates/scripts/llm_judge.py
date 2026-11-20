@@ -20,7 +20,8 @@ the wrapper can re-trigger on the next cron tick.
 
 Safety-classifier refusals are NOT quota: call_claude raises
 ClassifierRefusal and the batch goes through the failed-batch recovery
-ladder (reuse a cut-off reply, score-only retry, bisection).
+ladder (reuse a cut-off reply, score-only retry, bisection; a single paper
+still refused gets one full call with RESCUE_MODEL).
 """
 import argparse
 import json
@@ -119,12 +120,19 @@ REFUSAL_MARKERS = (
     "stopped by a safety classifier", "anthropic.com/legal/aup",
 )
 
-# Backup model for a turn the main model (ANTHROPIC_MODEL) refuses or cannot
-# serve: the CLI re-answers inside the same call, so no extra call of ours
-# (a refused call with none configured logs "model_refusal_no_fallback").
-# Cards the backup model scored are labelled (judge_model). Set
-# LIT_JUDGE_FALLBACK_MODEL="" to disable.
+# Backup model when the main model (ANTHROPIC_MODEL) is busy or unavailable:
+# the CLI re-answers inside the same call. It does NOT cover safety-classifier
+# refusals: with the flag on, refused calls still log
+# "model_refusal_no_fallback" (measured in production). Refusals
+# are handled by RESCUE_MODEL below. "" disables.
 FALLBACK_MODEL = os.environ.get("LIT_JUDGE_FALLBACK_MODEL", "sonnet")
+
+# Last rung of the recovery ladder: ONE full call with this model (--model) for
+# a single paper the main model still refuses after the score-only retry. Its
+# card is labelled (judge_model). Fires only on refusal evidence, never on a
+# plain parse failure: a systematic failure would otherwise turn into one call
+# per paper. "" disables.
+RESCUE_MODEL = os.environ.get("LIT_JUDGE_RESCUE_MODEL", "sonnet")
 
 
 # Diagnostics of the most recent call_claude(): session id, every assistant
@@ -136,7 +144,7 @@ LAST_CALL: dict = {}
 TRANSCRIPT_ROOT = Path.home() / ".claude" / "projects"
 
 
-def call_claude(prompt: str, timeout: int = 240) -> str:
+def call_claude(prompt: str, timeout: int = 240, model: str = None) -> str:
     # Pass prompt via stdin so it doesn't show in `ps` / `top -c`.
     # `--tools ""` disables ALL tool use (no MCP, no Read/Edit/Bash) so the
     # LLM can ONLY respond with text — preventing it from autonomously
@@ -147,7 +155,9 @@ def call_claude(prompt: str, timeout: int = 240) -> str:
     # is still the final result text, as before.
     LAST_CALL.clear()
     cmd = ["claude", "-p", "--tools", "", "--output-format", "stream-json", "--verbose"]
-    if FALLBACK_MODEL:
+    if model:  # explicit model for this call (the rescue rung); else ANTHROPIC_MODEL
+        cmd += ["--model", model]
+    if FALLBACK_MODEL and FALLBACK_MODEL != model:
         cmd += ["--fallback-model", FALLBACK_MODEL]
     try:
         res = subprocess.run(
@@ -201,6 +211,9 @@ def call_claude(prompt: str, timeout: int = 240) -> str:
     if not saw_result:  # not stream-json after all -> behave like the old text mode
         final = res.stdout
     LAST_CALL["final"] = final
+    # Refusal seen in the stream, also kept when the call "succeeded": an
+    # exit-0 apology after a classifier stop is then known to be a refusal.
+    LAST_CALL["refusal"] = refusal
     main_m, ans_m = LAST_CALL.get("main_model", ""), LAST_CALL.get("answer_model", "")
     if main_m and ans_m and ans_m != main_m:
         LAST_CALL["fallback_used"] = ans_m
@@ -386,7 +399,8 @@ SCORE_ONLY_SUFFIX = (
 )
 
 
-def judge_batch(records: list, batch_idx, score_only: bool = False) -> list:
+def judge_batch(records: list, batch_idx, score_only: bool = False,
+                model: str = None) -> list:
     """Judge a batch of papers in one LLM call. Returns enriched copies of
     the input records (same length, same order). score_only=True asks for
     {"i","score"} only (summary/commentary come back empty)."""
@@ -403,7 +417,7 @@ def judge_batch(records: list, batch_idx, score_only: bool = False) -> list:
     if score_only:
         prompt += SCORE_ONLY_SUFFIX
     try:
-        raw = call_claude(prompt)
+        raw = call_claude(prompt, model=model)
         arr = extract_json_array(raw)
     except (ValueError, json.JSONDecodeError, ClassifierRefusal) as e:
         # A refusal may come after part of the array was written: reuse it.
@@ -411,13 +425,27 @@ def judge_batch(records: list, batch_idx, score_only: bool = False) -> list:
             items, cut_at = find_partial_reply()
             if items is not None:
                 raise PartialReply(items, cut_at, e) from e
+        if not isinstance(e, ClassifierRefusal):
+            # Exit 0, but the reply is an apology after a classifier stop
+            # (the CLI "continues once" and the model declines): still a
+            # refusal, so the rescue rung may fire for it.
+            cat = LAST_CALL.get("refusal")
+            if cat is None:
+                cat = _refusal_in_transcript(LAST_CALL.get("session_id"))
+            if cat is not None:
+                raise ClassifierRefusal(
+                    f"classifier stop, no JSON after it [classifier refusal"
+                    f"{': ' + cat if cat else ''}]: {str(e)[:200]}") from e
         raise
     out = enrich(records, arr, batch_idx, score_only)
-    fb = LAST_CALL.get("fallback_used")
-    if fb:  # scored by the backup model: say so on the card
+    # Not the main model: the CLI's busy/unavailable fallback, or an explicit
+    # model (the rescue rung). Say so on the card.
+    used = LAST_CALL.get("fallback_used") or (
+        (LAST_CALL.get("answer_model") or model) if model else "")
+    if used:
         for o in out:
             if "judge_error" not in o:
-                o["judge_model"] = fb
+                o["judge_model"] = used
     return out
 
 
@@ -460,7 +488,9 @@ def enrich(records: list, arr: list, batch_idx, score_only: bool = False) -> lis
 # (every `claude -p` call re-sends the whole prompt + CLI overhead, so
 # per-paper retries multiply input tokens). Ladder:
 #   1. ONE score-only call for all the papers the batch did not score;
-#      bisect (halves, recursively) only if that call fails too;
+#      bisect (halves, recursively) only if that call fails too; a single
+#      paper the classifier still refuses gets ONE full call with
+#      RESCUE_MODEL (on refusal evidence only — never for parse failures);
 #   2. ONE full call for just the papers that scored >= min_score, to get the
 #      summary/commentary their digest card needs; if it fails they keep the
 #      score-only result (the card says so). No further retries.
@@ -469,13 +499,14 @@ def enrich(records: list, arr: list, batch_idx, score_only: bool = False) -> lis
 def score_only_isolate(recs: list, batch_idx) -> list:
     """Score-only judging of `recs` in one call; bisect on failure. A single
     paper that still fails comes back with judge_error. Same order as recs."""
-    err = ""
+    err, refused = "", False
     try:
         out = judge_batch(recs, batch_idx, score_only=True)
     except QuotaExhausted:
         raise
     except Exception as e:
         out, err = None, f"{type(e).__name__}: {str(e)[:120]}"
+        refused = isinstance(e, ClassifierRefusal)
     if out is not None:
         bad = [k for k, o in enumerate(out) if "judge_error" in o]
         if not bad:
@@ -487,6 +518,11 @@ def score_only_isolate(recs: list, batch_idx) -> list:
             return out
         err = "reply had none of the indices"
     if len(recs) == 1:
+        if refused and RESCUE_MODEL:
+            rescued = rescue_with_model(recs[0], batch_idx)
+            if rescued is not None:
+                return [rescued]
+            err += f"; {RESCUE_MODEL} rescue failed too"
         print(f"[llm_judge] score-only FAILED for {recs[0].get('doi', '?')} ({err})",
               file=sys.stderr)
         return [{**recs[0], "relevant": False, "score": 0,
@@ -496,6 +532,28 @@ def score_only_isolate(recs: list, batch_idx) -> list:
           f"bisecting {mid}+{len(recs) - mid}", file=sys.stderr)
     return (score_only_isolate(recs[:mid], batch_idx)
             + score_only_isolate(recs[mid:], batch_idx))
+
+
+def rescue_with_model(rec: dict, batch_idx):
+    """Last rung: ONE full call with RESCUE_MODEL for a single paper the main
+    model refused even in score-only mode (e.g. a title-only record whose input
+    itself trips the classifier). Returns the judged record, or None."""
+    doi = rec.get("doi", "?")
+    try:
+        out = judge_batch([rec], batch_idx, model=RESCUE_MODEL)
+    except QuotaExhausted:
+        raise
+    except Exception as e:
+        print(f"[llm_judge] {RESCUE_MODEL} rescue FAILED for {doi} "
+              f"({type(e).__name__}: {str(e)[:120]})", file=sys.stderr)
+        return None
+    if "judge_error" in out[0]:
+        print(f"[llm_judge] {RESCUE_MODEL} rescue FAILED for {doi} "
+              f"({out[0]['judge_error']})", file=sys.stderr)
+        return None
+    print(f"[llm_judge] {RESCUE_MODEL} rescue OK for {doi}: score {out[0].get('score')}",
+          file=sys.stderr)
+    return out[0]
 
 
 def resolve_partial(recs: list, pr: PartialReply, batch_idx, min_score: int) -> list:
@@ -546,8 +604,11 @@ def recover_failed(recs: list, batch_idx, min_score: int) -> list:
     print(f"[llm_judge] score-only recovery: scores="
           f"[{','.join('ERR' if 'judge_error' in o else str(o.get('score')) for o in out)}]",
           file=sys.stderr)
+    # Only score-only results need the full call; a paper the rescue rung
+    # already judged in full is done (and the main model would refuse it again).
     hits = [k for k, o in enumerate(out)
-            if "judge_error" not in o and o.get("score", 0) >= min_score]
+            if "judge_error" not in o and o.get("judge_mode") == "score_only"
+            and o.get("score", 0) >= min_score]
     if not hits:
         return out
     try:

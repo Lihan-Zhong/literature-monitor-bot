@@ -16,7 +16,12 @@ file runs them all and compares calls / scores / exit code with EXPECTED.
   cut_tx      : same, but the partial is only in the session transcript
   cut_twice   : the redo call is cut again while writing its #0 (= paper 2)
   cut_suspect : as cut, and the suspect's score-only call fails too -> ERR
-  refuse      : CLI gives up with a classifier refusal on any call with paper 2
+  refuse      : the main model refuses any call with paper 2 (exit 1); the
+                rescue model answers it -> paper 2 judged by Sonnet
+  refuse_all  : as refuse, and the rescue model refuses too  -> paper 2 ERR
+  apology_refusal : as refuse, but exit 0 + apology with refusal evidence
+  cut_suspect_refused : as cut, the suspect's score-only call is refused
+                -> rescue call for the suspect
   refuse_once : only the first call is refused
   refuse_cut  : refused after #0 was written -> partial reuse, as in cut
 """
@@ -45,8 +50,13 @@ EXPECTED = {  # scenario: (exit code, calls, emitted scores)
     "cut_tx": (0, ["FULL4", "FULL2", "SO1"], ["2", "4(so)", "1", "3"]),
     "cut_twice": (0, ["FULL4", "FULL2", "FULL1", "SO1", "SO1"], ["2", "4(so)", "1(so)", "3"]),
     "cut_suspect": (0, ["FULL4", "FULL2", "SO1"], ["2", "ERR", "1", "3"]),
-    "refuse": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SO1", "FULL2"],
-               ["2(so)", "4", "ERR", "3"]),
+    "refuse": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "FULL2"],
+               ["2(so)", "4", "1(snt)", "3"]),
+    "refuse_all": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "FULL2"],
+                   ["2(so)", "4", "ERR", "3"]),
+    "apology_refusal": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "FULL2"],
+                        ["2(so)", "4", "1(snt)", "3"]),
+    "cut_suspect_refused": (0, ["FULL4", "FULL2", "SO1", "SNT1"], ["2", "4(snt)", "1", "3"]),
     "refuse_once": (0, ["FULL4", "SO4", "FULL2"], ["2(so)", "4", "1(so)", "3"]),
     "refuse_cut": (0, ["FULL4", "FULL2", "SO1"], ["2", "4(so)", "1", "3"]),
 }
@@ -78,14 +88,14 @@ def run_scenario(scenario):
             parts.append(json.dumps(item(i, t, False), ensure_ascii=False))
         return "[" + ",".join(parts)
 
-    def fake_call(prompt, timeout=240):
+    def fake_call(prompt, timeout=240, model=None):
         ncalls["n"] += 1
         llm_judge.LAST_CALL.clear()
         sid = f"sess{ncalls['n']}"
         llm_judge.LAST_CALL["session_id"] = sid
         titles = re.findall(r"TITLE: (.*)", prompt)
         so = "仅打分" in prompt
-        log.append(("SO" if so else "FULL") + str(len(titles)))
+        log.append(("SNT" if model else "SO" if so else "FULL") + str(len(titles)))
 
         def reply(final, partial=None, tx=False):
             texts = []
@@ -108,7 +118,14 @@ def run_scenario(scenario):
             raise llm_judge.ClassifierRefusal(
                 "claude exit 1 [classifier refusal: bio]: API Error: safeguards flagged")
 
-        if scenario == "refuse" and "paper 2" in titles:
+        if scenario in ("refuse", "refuse_all") and "paper 2" in titles and (
+                not model or scenario == "refuse_all"):
+            refuse()
+        if scenario == "apology_refusal" and "paper 2" in titles and not model:
+            reply(apology)
+            llm_judge.LAST_CALL["refusal"] = "bio"  # the stream showed a stop
+            return apology
+        if scenario == "cut_suspect_refused" and so and titles == ["paper 1"]:
             refuse()
         if scenario == "refuse_once" and ncalls["n"] == 1:
             refuse()
@@ -116,7 +133,7 @@ def run_scenario(scenario):
             refuse(cut_reply(titles, "paper 1"))
         if scenario == "input" and "paper 2" in titles:
             return reply(apology)
-        if scenario.startswith("cut") and not so and "paper 1" in titles:
+        if scenario.startswith("cut") and not so and not model and "paper 1" in titles:
             return reply(apology, cut_reply(titles, "paper 1"), tx=(scenario == "cut_tx"))
         if scenario == "cut_twice" and not so and titles and titles[0] == "paper 2":
             return reply(apology, cut_reply(titles, "paper 2"))
@@ -151,7 +168,8 @@ def run_scenario(scenario):
     def tag(r):
         if "judge_error" in r:
             return "ERR"
-        return f"{r['score']}{'(so)' if r.get('judge_mode') == 'score_only' else ''}"
+        return (f"{r['score']}{'(so)' if r.get('judge_mode') == 'score_only' else ''}"
+                f"{'(snt)' if 'sonnet' in str(r.get('judge_model', '')) else ''}")
 
     print(json.dumps({"exit": code, "calls": log, "emitted": [tag(r) for r in rows]}))
 
