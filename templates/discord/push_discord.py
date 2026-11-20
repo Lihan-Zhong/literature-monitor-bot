@@ -50,6 +50,12 @@ DIGEST_DIR = ROOT / "digests"
 RUNS_DIR = DIGEST_DIR / "runs"
 STATE_DIR = ROOT / "state"
 CACHE_DB = ROOT / "cache" / "seen.sqlite"
+# Papers the judge could not score, counted per run. A paper is retried on the
+# next cron; once it has failed in MAX_JUDGE_FAIL_RUNS separate runs it is
+# cached with score -1 (= "unjudgeable, retries stopped") and listed for a
+# manual look, so a paper that always trips the model does not loop forever.
+JUDGE_FAIL_LEDGER = ROOT / "cache" / "judge_failures.json"
+MAX_JUDGE_FAIL_RUNS = 2
 
 USER_AGENT = "lit-bot (+local literature digest, 0.1)"
 MAX_CONTENT = 2000
@@ -162,7 +168,8 @@ def parse_score(value: Any) -> int:
 # rendering
 # --------------------------------------------------------------------------- #
 def render_header(source: str, now_str: str, window, footer: str,
-                  quota_hit: bool, n_hits: int, quota_reason: str = "") -> str:
+                  quota_hit: bool, n_hits: int, quota_reason: str = "",
+                  n_errors: int = 0) -> str:
     lines = [f"## 📚 {source} · {now_str}"]
     if quota_hit:
         if quota_reason == "oauth":
@@ -175,7 +182,13 @@ def render_header(source: str, now_str: str, window, footer: str,
             lines.append("⚠️ **本次运行 Claude 调用失败（临时错误，如 529 过载）**，"
                          "未判完的下次 cron 自动续跑（本次未推的论文不会入库、下次会重扫）")
     lines.append(f"窗口: {window[0]} → {window[1]}")
-    lines.append(f"命中 {n_hits} 篇相关文献" if n_hits else "今日无相关文献")
+    if n_hits:
+        lines.append(f"命中 {n_hits} 篇相关文献")
+    elif n_errors:
+        # Not "no relevant papers": some were never scored (⚠️ list below).
+        lines.append(f"已打分的论文中无相关文献，另有 {n_errors} 篇打分失败（见下）")
+    else:
+        lines.append("今日无相关文献")
     lines.append(footer)
     if n_hits:
         # Push feed and Q&A live in separate channels; point the user at the
@@ -199,7 +212,11 @@ def build_embed(p: dict, idx: int, total: int) -> dict[str, Any]:
     embed: dict[str, Any] = {
         "title": clip(f"[{idx}/{total}] {p.get('title', '(no title)').strip()}", 256),
         "color": SCORE_COLORS.get(score, DEFAULT_COLOR),
-        "description": clip(p.get("summary_zh", "").strip(), MAX_EMBED_DESC),
+        "description": clip(
+            p.get("summary_zh", "").strip()
+            or ("（仅打分模式：完整判读被中断，没有生成总结，请看原文）"
+                if p.get("judge_mode") == "score_only" else ""),
+            MAX_EMBED_DESC),
         "footer": {"text": clip(f"{p.get('category', '')} · 追问：展开第 {idx} 条", 2048)},
         "fields": [],
     }
@@ -207,8 +224,14 @@ def build_embed(p: dict, idx: int, total: int) -> dict[str, Any]:
         embed["url"] = url
     if authors:
         embed["fields"].append({"name": "作者", "value": clip(authors, MAX_FIELD_VALUE)})
+    # judge_model is set only when the backup model (not the main model)
+    # scored the paper
+    jm = str(p.get("judge_model") or "")
+    model_note = (f" · {'Sonnet' if 'sonnet' in jm.lower() else jm} 备用模型打分"
+                  if jm else "")
     embed["fields"].append(
-        {"name": "评分", "value": f"{'⭐' * score if score else '未评分'} ({score}/5)", "inline": True}
+        {"name": "评分", "value": f"{'⭐' * score if score else '未评分'} ({score}/5){model_note}",
+         "inline": True}
     )
     if p.get("category"):
         embed["fields"].append({"name": "类别", "value": clip(p["category"], 256), "inline": True})
@@ -342,6 +365,48 @@ def update_cache(papers: list[dict]) -> None:
     con.close()
 
 
+def _ledger_key(p: dict) -> str:
+    return f"{p.get('doi', '')}|v{p.get('version', '1')}"
+
+
+def load_fail_ledger() -> dict:
+    try:
+        return json.loads(JUDGE_FAIL_LEDGER.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def apply_fail_ledger(ledger: dict, errored: list[dict], scored: list[dict]) -> list[dict]:
+    """In memory: clear papers that scored this run, count one more failed run
+    for each errored paper (sets p["_fail_runs"]). Returns the errored papers
+    that reached MAX_JUDGE_FAIL_RUNS (to cache as score -1)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    for p in scored:
+        ledger.pop(_ledger_key(p), None)
+    capped = []
+    for p in errored:
+        ent = ledger.setdefault(_ledger_key(p), {
+            "runs": 0, "first": now, "title": (p.get("title") or "")[:200]})
+        ent["runs"] += 1
+        ent["last"] = now
+        ent["error"] = str(p.get("judge_error", ""))[:300]
+        p["_fail_runs"] = ent["runs"]
+        if ent["runs"] >= MAX_JUDGE_FAIL_RUNS:
+            capped.append(p)
+    return capped
+
+
+def save_fail_ledger(ledger: dict) -> None:
+    JUDGE_FAIL_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    JUDGE_FAIL_LEDGER.write_text(json.dumps(ledger, ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+
+
+def paper_link(p: dict) -> str:
+    return (p.get("biorxiv_url") or p.get("html_url")
+            or (f"https://doi.org/{p['doi']}" if p.get("doi") else ""))
+
+
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
@@ -400,7 +465,16 @@ def main() -> int:
         except json.JSONDecodeError:
             print(f"[push_discord] skipping bad line: {line[:120]!r}", file=sys.stderr)
 
-    papers = [p for p in all_papers if int(p.get("score", 0)) >= args.min_score]
+    # Papers the LLM judge could not score (llm_judge.py sets judge_error).
+    # They are NOT "judged score 0": keep them out of seen.sqlite so the next
+    # cron re-judges them, and name them in a ⚠️ line (seen in production:
+    # such papers were cached as score 0 under a "✅ 自检正常" header).
+    errored = [p for p in all_papers if p.get("judge_error")]
+    scored = [p for p in all_papers if not p.get("judge_error")]
+    fail_ledger = load_fail_ledger()
+    capped = apply_fail_ledger(fail_ledger, errored, scored)  # in memory only
+
+    papers = [p for p in scored if int(p.get("score", 0)) >= args.min_score]
     papers.sort(key=lambda p: -int(p.get("score", 0)))
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -408,29 +482,49 @@ def main() -> int:
     footer = (
         f"📊 过滤强度: 类别白名单留 {args.scanned} → "
         f"关键词留 {args.keyword_pass} → 标题 triage 留 {args.triage_pass} → "
-        f"摘要判读得 {len(all_papers)} → score≥{args.min_score} 留 {len(papers)}"
+        f"摘要判读得 {len(scored)}"
+        + (f"（另 {len(errored)} 篇打分失败）" if errored else "")
+        + f" → score≥{args.min_score} 留 {len(papers)}"
     )
     counts = {
         "scanned": args.scanned,
         "keyword_pass": args.keyword_pass,
         "triage_pass": args.triage_pass,
-        "judged": len(all_papers),
+        "judged": len(scored),
+        "judge_errors": len(errored),
         "selected": len(papers),
         "min_score": args.min_score,
         "quota_hit": bool(args.quota_hit),
     }
     header = render_header(args.source, now_str, window, footer,
-                           bool(args.quota_hit), len(papers), args.quota_reason)
+                           bool(args.quota_hit), len(papers), args.quota_reason,
+                           n_errors=len(errored))
     if args.notice.strip():
         header += f"\n⚠️ {args.notice.strip()}"
+    if errored:
+        shown = errored[:6]
+        lines = [f"\n⚠️ {len(errored)} 篇摘要打分失败（整批判读 + 仅打分重试/二分定位 都失败）："]
+        for p in shown:
+            title = clip(p.get("title", "").strip() or p.get("doi", "?"), 80)
+            link = paper_link(p)
+            link = f" <{link}>" if link else ""
+            if p in capped:
+                status = f"已连续 {p['_fail_runs']} 次失败，停止重试，请人工看"
+            else:
+                status = f"第 {p['_fail_runs']} 次失败，下一趟 cron 自动重试"
+            lines.append(f"• {title} — {status}{link}")
+        if len(errored) > len(shown):
+            lines.append(f"• …另 {len(errored) - len(shown)} 篇")
+        header += "\n".join(lines)
     # Self-check line: on a genuinely empty result with NO failure signal
-    # (no quota hit, no fetch/coverage notice), state explicitly that the run
-    # was healthy — so a real quiet day is distinguishable at a glance from a
-    # silent failure (which instead shows a ⚠️ banner above).
-    degraded = bool(args.quota_hit) or bool(args.notice.strip())
+    # (no quota hit, no fetch/coverage notice, no judge error), state
+    # explicitly that the run was healthy — so a real quiet day is
+    # distinguishable at a glance from a silent failure (which instead shows
+    # a ⚠️ banner above).
+    degraded = bool(args.quota_hit) or bool(args.notice.strip()) or bool(errored)
     if len(papers) == 0 and not degraded:
         header += ("\n✅ 自检正常：抓取 / 筛选 / 判读均成功完成"
-                   f"（扫描 {args.scanned} 篇 → 判读 {len(all_papers)} 篇 → 命中 0），"
+                   f"（扫描 {args.scanned} 篇 → 判读 {len(scored)} 篇 → 命中 0），"
                    "确为「真·无相关文献」，非故障。")
     payloads = build_payloads(header, papers)
 
@@ -447,7 +541,10 @@ def main() -> int:
         digest = write_digest_md(papers, args.scanned, args.source, window)
         print(f"[push_discord] archived to {digest}", file=sys.stderr)
     write_followup_state(papers, args.source, window, counts)
-    update_cache(all_papers)
+    # judge_error papers stay OUT of the cache (next cron retries them) until
+    # they hit the retry cap; then they go in as score -1 = unjudgeable.
+    save_fail_ledger(fail_ledger)
+    update_cache(scored + [{**p, "relevant": False, "score": -1} for p in capped])
 
     for index, payload in enumerate(payloads, start=1):
         post(webhook, payload)

@@ -213,10 +213,40 @@ digest footer shows "摘要判读得 N" (N ≥ 0). A failure shows a ⚠️ bann
 ### Failure taxonomy (all handled → ⚠️ banner, retried next cron)
 | Symptom in `logs/<src>-<date>.log` | Cause | Fix already in templates |
 |---|---|---|
-| `claude exit 1`, empty stderr | weekly quota exhausted | triage/judge exit 42 on ANY non-zero claude exit (not just keyword match) → ⚠️ |
+| `claude exit 1`, empty stderr | weekly quota exhausted | triage/judge exit 42 on ANY non-zero claude exit that is not a classifier refusal (not just keyword match) → ⚠️ |
 | `529 Overloaded` | transient Anthropic server overload | same exit-42 path; retries next cron |
 | `OAuth session expired…` | stored OAuth expired | user runs `/login` to refresh, then re-run |
+| `[classifier refusal: …]`, `API Error: … safeguards flagged this session`, or a reply saying the previous answer was stopped by a safety check | a safety classifier stopped the judge (false positives on ordinary abstracts happen) | **not** quota: failed-batch recovery (below); papers still unscored get a ⚠️ line and are retried next cron |
 | network / HTTP / `JSONDecodeError` from Crossref + `candidates=0 scanned=0` | **fetch source down** | `_crossref_get` retries 5× (catches HTTPError/URLError/**OSError**/**ValueError**); `main()` exits 17; wrapper checks the fetch exit code → ⚠️ banner (+ schedules the auto-retry) |
+
+### Judge failures never zero-score a batch
+The abstract judge scores 8 papers per call, so one bad reply used to cost the whole
+batch: its papers were cached as score 0 and never judged again. Two real causes: a
+**safety classifier stopping the reply** (ordinary biology abstracts can trip it —
+mid-array, or before any output, in which case the CLI exits 1 with
+`API Error: … safeguards flagged this session`), and an unparseable reply. `llm_judge.py`
+recovers **without one call per paper**:
+1. **Cut-off reply** — the complete items already written are reused (from the
+   stream-json messages or the session transcript); the paper being written when it
+   stopped is the suspect; the rest are redone in ONE call; the suspect gets one
+   score-only call.
+2. **Nothing usable** — ONE score-only call for the batch (a few output tokens leave
+   little for a classifier to trip on); bisect only if that fails too; then ONE full call
+   for the papers that scored ≥ 3, to get their summaries (if that fails, the card says
+   「仅打分模式」).
+3. **Backup model** — `claude -p --fallback-model sonnet` lets the CLI re-answer a turn
+   the main model refuses or cannot serve, inside the same call (env
+   `LIT_JUDGE_FALLBACK_MODEL`; `""` disables it; such cards say 「Sonnet 备用模型打分」).
+   It only helps when the CLI's own retry is refused too; when the model merely declines
+   to regenerate, steps 1–2 do the work.
+
+A classifier refusal is **not** treated as quota (that would skip the recovery and show a
+false quota banner). `push_discord.py` keeps papers that still could not be scored **out
+of** `seen.sqlite` (retried next cron), lists them under a ⚠️ line with links, and after 2
+failed runs (`cache/judge_failures.json`) caches them as score −1 for a manual look. A run
+with such papers never shows 「✅ 自检正常」. Typical cost: a stopped batch → 2–3 calls; a
+paper that always trips the classifier → about log₂(batch) extra score-only calls.
+Offline tests (no LLM call, no network): `bash tests/run_all.sh`.
 
 ### The bioRxiv data source (why Crossref, not api.biorxiv.org)
 bioRxiv's own JSON API (`api.biorxiv.org/details/…`) broke in their **2026-09 site
@@ -247,6 +277,7 @@ saturated priority partition. See **[docs/hpc-partition-fallback.md](docs/hpc-pa
   8 papers/call. This is where the 15× savings come from.
 - `claude -p --tools ""` (never `--bare`); prompt via **stdin**.
 - Only the ~3-8 papers that reach Stage 3 cost real tokens.
+- Recovery stays batched too: never re-judge one paper per call (see *Judge failures never zero-score a batch*).
 
 ## Follow-up, deep analysis, figures
 - **Ordinary follow-up** ("展开第 N 条") reads `state/latest_digest.json` — no refetch,
