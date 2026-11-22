@@ -492,8 +492,11 @@ def enrich(records: list, arr: list, batch_idx, score_only: bool = False) -> lis
 #      paper the classifier still refuses gets ONE full call with
 #      RESCUE_MODEL (on refusal evidence only — never for parse failures);
 #   2. ONE full call for just the papers that scored >= min_score, to get the
-#      summary/commentary their digest card needs; if it fails they keep the
-#      score-only result (the card says so). No further retries.
+#      summary/commentary their digest card needs (full_rejudge). If the main
+#      model already refused these abstracts in a full call, this call goes
+#      straight to RESCUE_MODEL; if the main model refuses it now, ONE
+#      RESCUE_MODEL call follows. A paper still without a full judgement keeps
+#      the score-only result (the card says so). No further retries.
 # QuotaExhausted propagates everywhere (caller stops, exits 42).
 # ---------------------------------------------------------------------------
 def score_only_isolate(recs: list, batch_idx) -> list:
@@ -583,7 +586,8 @@ def resolve_partial(recs: list, pr: PartialReply, batch_idx, min_score: int) -> 
         except Exception as e:
             print(f"[llm_judge] redo call FAILED ({type(e).__name__}: {str(e)[:160]}); "
                   "falling back to score-only recovery", file=sys.stderr)
-            res = recover_failed(sub, batch_idx, min_score)
+            res = recover_failed(sub, batch_idx, min_score,
+                                 refused=isinstance(e, ClassifierRefusal))
         miss = [j for j, o in enumerate(res) if "judge_error" in o]
         if miss:
             again = recover_failed([sub[j] for j in miss], batch_idx, min_score)
@@ -592,14 +596,23 @@ def resolve_partial(recs: list, pr: PartialReply, batch_idx, min_score: int) -> 
         for k, o in zip(rest, res):
             out[k] = o
     if suspect is not None:
-        out[suspect] = score_only_isolate([recs[suspect]], batch_idx)[0]
+        so = score_only_isolate([recs[suspect]], batch_idx)[0]
+        # A hit needs its card text, and the main model just refused to write
+        # it: the rescue model gets the one full call.
+        if ("judge_error" not in so and so.get("judge_mode") == "score_only"
+                and so.get("score", 0) >= min_score):
+            full = full_rejudge([recs[suspect]], batch_idx, refused=True)[0]
+            if full is not None:
+                so = full
+        out[suspect] = so
     return out
 
 
-def recover_failed(recs: list, batch_idx, min_score: int) -> list:
+def recover_failed(recs: list, batch_idx, min_score: int, refused: bool = False) -> list:
     """Score `recs` (papers a batch call failed to score) with the ladder
     above. Returns records in the same order; judge_error on any paper that
-    could not be scored at all."""
+    could not be scored at all. refused=True: the main model refused these
+    papers in a full call (ClassifierRefusal), so full_rejudge skips it."""
     out = score_only_isolate(recs, batch_idx)
     print(f"[llm_judge] score-only recovery: scores="
           f"[{','.join('ERR' if 'judge_error' in o else str(o.get('score')) for o in out)}]",
@@ -611,20 +624,64 @@ def recover_failed(recs: list, batch_idx, min_score: int) -> list:
             and o.get("score", 0) >= min_score]
     if not hits:
         return out
-    try:
-        full = judge_batch([recs[k] for k in hits], batch_idx)
-    except QuotaExhausted:
-        raise
-    except Exception as e:
-        print(f"[llm_judge] full re-judge of {len(hits)} hit(s) FAILED "
-              f"({type(e).__name__}: {str(e)[:160]}); keeping score-only cards",
-              file=sys.stderr)
-        return out
+    full = full_rejudge([recs[k] for k in hits], batch_idx, refused)
     for k, o in zip(hits, full):
-        if "judge_error" not in o:
+        if o is not None:
             out[k] = o
-    print(f"[llm_judge] full re-judge of {len(hits)} hit(s) OK", file=sys.stderr)
     return out
+
+
+def full_rejudge(recs: list, batch_idx, refused: bool) -> list:
+    """ONE full call for hits that only have a score-only result, so their card
+    gets the summary/commentary. Returns a list aligned with recs: the full
+    record, or None (that paper keeps its score-only card).
+
+    The main model is skipped when it already refused these abstracts in a full
+    call (refused=True): in production, re-sending them was refused again every
+    time, which left the hits with bare score-only cards. If the main model
+    refuses now, the rescue model gets ONE call for the rest. Any other failure
+    gets no further call. Items a cut-off reply already wrote are kept."""
+    res = [None] * len(recs)
+    todo = list(range(len(recs)))
+    if refused and RESCUE_MODEL:
+        models = [RESCUE_MODEL]
+    else:
+        models = [None] + ([RESCUE_MODEL] if RESCUE_MODEL else [])
+    for model in models:
+        who = model or "main model"
+        sub = [recs[k] for k in todo]
+        was_refusal = False
+        try:
+            done = judge_batch(sub, batch_idx, model=model)
+        except QuotaExhausted:
+            raise
+        except PartialReply as pr:  # stopped mid-array: keep what it wrote
+            was_refusal = True
+            done = enrich(sub, pr.items, batch_idx)
+            if model:
+                for o in done:
+                    if "judge_error" not in o:
+                        o["judge_model"] = LAST_CALL.get("answer_model") or model
+            print(f"[llm_judge] full re-judge ({who}) cut off; kept "
+                  f"{sum('judge_error' not in o for o in done)} of {len(sub)}",
+                  file=sys.stderr)
+        except Exception as e:
+            was_refusal = isinstance(e, ClassifierRefusal)
+            done = []
+            print(f"[llm_judge] full re-judge of {len(sub)} hit(s) FAILED ({who}: "
+                  f"{type(e).__name__}: {str(e)[:160]})", file=sys.stderr)
+        for k, o in zip(todo, done):
+            if "judge_error" not in o:
+                res[k] = o
+        todo = [k for k in todo if res[k] is None]
+        if not todo:
+            print(f"[llm_judge] full re-judge of {len(recs)} hit(s) OK ({who})",
+                  file=sys.stderr)
+            return res
+        if model is None and not was_refusal:
+            break  # the rescue model is for refusals only
+    print(f"[llm_judge] {len(todo)} hit(s) keep score-only cards", file=sys.stderr)
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +723,7 @@ def main():
             continue
 
         t0 = time.time()
+        batch_refused = False  # the main model refused this batch's full call
         try:
             judged = judge_batch(chunk, batch_idx)
         except QuotaExhausted as e:
@@ -695,6 +753,7 @@ def main():
             # let the pusher cache those papers as score 0 -> never judged
             # again (a real loss seen in production). Instead:
             # recover_failed() below.
+            batch_refused = isinstance(e, ClassifierRefusal)
             print(f"[llm_judge] batch {batch_idx} FAILED ({type(e).__name__}: "
                   f"{str(e)[:200]}); recovering with a score-only call",
                   file=sys.stderr)
@@ -712,7 +771,7 @@ def main():
         if failed:
             try:
                 recovered = recover_failed([chunk[k] for k in failed], batch_idx,
-                                           args.min_score)
+                                           args.min_score, refused=batch_refused)
                 for k, o in zip(failed, recovered):
                     judged[k] = o
             except QuotaExhausted as qe:

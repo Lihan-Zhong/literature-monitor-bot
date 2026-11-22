@@ -10,6 +10,9 @@ Single LLM call regardless of candidate count. Token cost ~= 500 (system) +
 total — about 50× cheaper than per-paper full-abstract judging.
 
 Quota detection: same exit-42 convention as llm_judge.py.
+Safety-classifier refusal: NOT exit 42. The refused chunk's titles all pass
+through as 'maybe', so the judge (which has the refusal-recovery ladder)
+scores them. See ClassifierRefusal below.
 """
 import argparse
 import json
@@ -61,6 +64,20 @@ QUOTA_SIGNATURES = (
     "429",
 )
 
+# Same strings as llm_judge.REFUSAL_MARKERS; keep the two in sync.
+REFUSAL_MARKERS = ("safeguards flagged", "safeguards stopped",
+                   "stopped by a safety classifier", "anthropic.com/legal/aup")
+
+
+class ClassifierRefusal(Exception):
+    """The safety classifier refused the triage call (exit 1, "API Error: ...
+    safeguards flagged this session"). This is not quota. Exiting 42 would show
+    a false quota banner and stop the whole run at Stage 2. The next cron sends
+    the same titles, which would likely be refused again (refusals repeat on a
+    re-run). So every run would stop here until the flagged title left the
+    fetch window, and that window's papers would be lost. main() instead
+    passes the chunk's titles straight to the judge."""
+
 
 def call_claude(prompt: str, timeout: int = 300) -> str:
     # stdin for prompt (hides from ps/top); --tools "" disables all tool use
@@ -86,6 +103,8 @@ def call_claude(prompt: str, timeout: int = 300) -> str:
         # quota/transient → exit 42, and let the next cron retry.
         msg = (res.stderr + res.stdout).lower()
         detail = (res.stderr.strip() or res.stdout.strip() or "(empty output)")[:300]
+        if any(m in msg for m in REFUSAL_MARKERS):
+            raise ClassifierRefusal(f"claude exit {res.returncode}: {detail!r}")
         kind = "quota signal" if any(s in msg for s in QUOTA_SIGNATURES) else "hard failure"
         print(f"__QUOTA_EXHAUSTED__ [{kind}] claude exit {res.returncode}: {detail!r}",
               file=sys.stderr)
@@ -139,7 +158,17 @@ def main():
         )
         prompt = SYSTEM_PROMPT + "\n\n## 标题列表：\n\n" + title_block + \
                  f"\n\n## 输出：\n请输出长度恰好为 {len(chunk)} 的 JSON 数组。"
-        raw = call_claude(prompt)
+        try:
+            raw = call_claude(prompt)
+        except ClassifierRefusal as e:
+            # No retry here (same titles, same refusal): the judge sees the
+            # abstracts and has the recovery ladder. Costs a few more judge
+            # batches on that day; no paper is lost.
+            print(f"[triage] chunk {chunk_start} classifier refusal ({e}); "
+                  f"passing all {len(chunk)} titles to the judge", file=sys.stderr)
+            for j in range(len(chunk)):
+                labels[chunk_start + j] = "maybe"
+            continue
         try:
             arr = extract_json_array(raw)
         except Exception as e:

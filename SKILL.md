@@ -214,9 +214,9 @@ digest footer shows "摘要判读得 N" (N ≥ 0). A failure shows a ⚠️ bann
 | Symptom in `logs/<src>-<date>.log` | Cause | Fix already in templates |
 |---|---|---|
 | `claude exit 1`, empty stderr | weekly quota exhausted | triage/judge exit 42 on ANY non-zero claude exit that is not a classifier refusal (not just keyword match) → ⚠️ |
-| `529 Overloaded` | transient Anthropic server overload | same exit-42 path; retries next cron |
+| `529 Overloaded` | transient Anthropic server overload | same exit-42 path; retries next cron. The ⚠️ reason is matched only against what the failure said (the scripts' own markers, counters and DOIs are stripped first), so this shows as a temporary error, not quota |
 | `OAuth session expired…` | stored OAuth expired | user runs `/login` to refresh, then re-run |
-| `[classifier refusal: …]`, `API Error: … safeguards flagged this session`, or a reply saying the previous answer was stopped by a safety check | a safety classifier stopped the judge (false positives on ordinary abstracts happen) | **not** quota: failed-batch recovery (below); papers still unscored get a ⚠️ line and are retried next cron |
+| `[classifier refusal: …]`, `API Error: … safeguards flagged this session`, or a reply saying the previous answer was stopped by a safety check | a safety classifier stopped the judge (false positives on ordinary abstracts happen) | **not** quota: failed-batch recovery (below); papers still unscored get a ⚠️ line and are retried next cron. A refused title-triage call passes all its titles to the judge as `maybe` (no retry, no exit 42) |
 | network / HTTP / `JSONDecodeError` from Crossref + `candidates=0 scanned=0` | **fetch source down** | `_crossref_get` retries 5× (catches HTTPError/URLError/**OSError**/**ValueError**); `main()` exits 17; wrapper checks the fetch exit code → ⚠️ banner (+ schedules the auto-retry) |
 
 ### Judge failures never zero-score a batch
@@ -229,11 +229,13 @@ recovers **without one call per paper**:
 1. **Cut-off reply** — the complete items already written are reused (from the
    stream-json messages or the session transcript); the paper being written when it
    stopped is the suspect; the rest are redone in ONE call; the suspect gets one
-   score-only call.
+   score-only call (and, if it scores ≥ 3, one backup-model full call for its summary).
 2. **Nothing usable** — ONE score-only call for the batch (a few output tokens leave
    little for a classifier to trip on); bisect only if that fails too; then ONE full call
-   for the papers that scored ≥ 3, to get their summaries (if that fails, the card says
-   「仅打分模式」).
+   for the papers that scored ≥ 3, to get their summaries. That call goes straight to the
+   backup model when the main model already refused this batch (re-sending it was refused
+   again every time in production); otherwise to the main model, then once to the backup
+   model if that is a refusal. Only if it still fails does the card say 「仅打分模式」.
 3. **Backup model for a refused paper** — a single paper the classifier still refuses
    after the score-only retry gets ONE full call with `--model sonnet` (env
    `LIT_JUDGE_RESCUE_MODEL`; `""` disables it; its card says 「Sonnet 备用模型打分」). It

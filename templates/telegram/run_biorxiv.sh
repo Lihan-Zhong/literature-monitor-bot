@@ -37,12 +37,20 @@ alert() {
 # Classify an LLM-stage stderr -> oauth|quota|overload (or empty) so the pusher
 # shows a SPECIFIC warning banner (e.g. OAuth expired -> run /login) not a generic one.
 classify_llm_fail() {
-    local f="$1"
-    if grep -qiE "OAuth session expired|Failed to authenticate|could not be refreshed" "$f" 2>/dev/null; then
+    # Match only what the failure itself said. Our own text is dropped first:
+    # the "__QUOTA_EXHAUSTED__" / "QUOTA EXHAUSTED" markers, llm_judge's
+    # "quota_skipped=N" summary and "SKIPPED (quota)" lines, and DOIs (one
+    # ending in 429 matched "429"). Matching the whole file made every
+    # non-oauth failure read as quota, even a 529 Overloaded.
+    local txt
+    txt=$(grep -v "SKIPPED (quota)" "$1" 2>/dev/null \
+          | sed -E -e 's/__QUOTA_EXHAUSTED__|QUOTA EXHAUSTED|quota_skipped=[0-9]*//g' \
+                   -e 's#10\.[0-9]{4,9}/[^[:space:]]+##g')
+    if grep -qiE "OAuth session expired|Failed to authenticate|could not be refreshed" <<<"$txt"; then
         echo oauth
-    elif grep -qiE "usage limit|quota|rate.?limit|5-hour|weekly|session (window|limit)|429" "$f" 2>/dev/null; then
+    elif grep -qiE "usage limit|quota|rate.?limit|5-hour|weekly|session (window|limit)|429" <<<"$txt"; then
         echo quota
-    elif grep -qiE "Overloaded|529" "$f" 2>/dev/null; then
+    elif grep -qiE "Overloaded|529" <<<"$txt"; then
         echo overload
     fi
 }

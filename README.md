@@ -166,7 +166,7 @@ Every stage failure in this repo is made **loud** instead: it pushes a ⚠️ ba
 than a fake-empty digest, **does not cache** the un-pushed papers (they're retried on the
 next run — nothing is lost), and logs a distinct marker you can grep. The handled cases —
 quota exhaustion, transient overload, expired auth, flaky-API timeouts, stuck SLURM jobs,
-a safety classifier stopping the LLM judge —
+a safety classifier stopping the title triage or the LLM judge (refused papers get a backup model instead of being lost) —
 are documented in the *Operational resilience* section of [SKILL.md](SKILL.md). They were
 all found the hard way in production.
 

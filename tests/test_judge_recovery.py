@@ -24,6 +24,17 @@ file runs them all and compares calls / scores / exit code with EXPECTED.
                 -> rescue call for the suspect
   refuse_once : only the first call is refused
   refuse_cut  : refused after #0 was written -> partial reuse, as in cut
+  hits_refused     : batch fails without refusal evidence; the main model
+                     refuses the hits' full call -> ONE rescue call for them
+  hits_refused_all : as hits_refused, the rescue model refuses too
+                     -> hits keep score-only cards
+  hits_cut         : the hits' full call is cut after writing paper 1
+                     -> paper 1 kept, rescue call for paper 3 only
+  rescue_off       : RESCUE_MODEL = "" (kill switch) + refuse_once
+                     -> the pre-rescue ladder
+A batch the main model refused (or a cut-off suspect that is a hit) sends
+the hits' full re-judge straight to the rescue model: re-sending it to the
+main model was refused again every time it was seen in production.
 """
 import io
 import json
@@ -46,19 +57,26 @@ EXPECTED = {  # scenario: (exit code, calls, emitted scores)
               ["2(so)", "4", "ERR", "3"]),
     "missing": (0, ["FULL4", "SO1", "FULL1"], ["2", "4", "1", "3"]),
     "quota": (42, ["FULL4", "SO4"], []),
-    "cut": (0, ["FULL4", "FULL2", "SO1"], ["2", "4(so)", "1", "3"]),
-    "cut_tx": (0, ["FULL4", "FULL2", "SO1"], ["2", "4(so)", "1", "3"]),
-    "cut_twice": (0, ["FULL4", "FULL2", "FULL1", "SO1", "SO1"], ["2", "4(so)", "1(so)", "3"]),
+    "cut": (0, ["FULL4", "FULL2", "SO1", "SNT1"], ["2", "4(snt)", "1", "3"]),
+    "cut_tx": (0, ["FULL4", "FULL2", "SO1", "SNT1"], ["2", "4(snt)", "1", "3"]),
+    "cut_twice": (0, ["FULL4", "FULL2", "FULL1", "SO1", "SO1", "SNT1"],
+                  ["2", "4(snt)", "1(so)", "3"]),
     "cut_suspect": (0, ["FULL4", "FULL2", "SO1"], ["2", "ERR", "1", "3"]),
-    "refuse": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "FULL2"],
-               ["2(so)", "4", "1(snt)", "3"]),
-    "refuse_all": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "FULL2"],
-                   ["2(so)", "4", "ERR", "3"]),
-    "apology_refusal": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "FULL2"],
-                        ["2(so)", "4", "1(snt)", "3"]),
+    "refuse": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "SNT2"],
+               ["2(so)", "4(snt)", "1(snt)", "3(snt)"]),
+    "refuse_all": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "SNT2"],
+                   ["2(so)", "4(snt)", "ERR", "3(snt)"]),
+    "apology_refusal": (0, ["FULL4", "SO4", "SO2", "SO2", "SO1", "SNT1", "SO1", "SNT2"],
+                        ["2(so)", "4(snt)", "1(snt)", "3(snt)"]),
     "cut_suspect_refused": (0, ["FULL4", "FULL2", "SO1", "SNT1"], ["2", "4(snt)", "1", "3"]),
-    "refuse_once": (0, ["FULL4", "SO4", "FULL2"], ["2(so)", "4", "1(so)", "3"]),
-    "refuse_cut": (0, ["FULL4", "FULL2", "SO1"], ["2", "4(so)", "1", "3"]),
+    "refuse_once": (0, ["FULL4", "SO4", "SNT2"], ["2(so)", "4(snt)", "1(so)", "3(snt)"]),
+    "refuse_cut": (0, ["FULL4", "FULL2", "SO1", "SNT1"], ["2", "4(snt)", "1", "3"]),
+    "hits_refused": (0, ["FULL4", "SO4", "FULL2", "SNT2"],
+                     ["2(so)", "4(snt)", "1(so)", "3(snt)"]),
+    "hits_refused_all": (0, ["FULL4", "SO4", "FULL2", "SNT2"],
+                         ["2(so)", "4(so)", "1(so)", "3(so)"]),
+    "hits_cut": (0, ["FULL4", "SO4", "FULL2", "SNT1"], ["2(so)", "4", "1(so)", "3(snt)"]),
+    "rescue_off": (0, ["FULL4", "SO4", "FULL2"], ["2(so)", "4", "1(so)", "3"]),
 }
 
 
@@ -71,6 +89,8 @@ def run_scenario(scenario):
     log, ncalls = [], {"n": 0}
     tx_root = Path(tempfile.mkdtemp())
     llm_judge.TRANSCRIPT_ROOT = tx_root
+    if scenario == "rescue_off":
+        llm_judge.RESCUE_MODEL = ""
 
     def item(i, t, so):
         it = {"i": i, "score": scores[t]}
@@ -127,10 +147,15 @@ def run_scenario(scenario):
             return apology
         if scenario == "cut_suspect_refused" and so and titles == ["paper 1"]:
             refuse()
-        if scenario == "refuse_once" and ncalls["n"] == 1:
+        if scenario in ("refuse_once", "rescue_off") and ncalls["n"] == 1:
             refuse()
-        if scenario == "refuse_cut" and not so and "paper 1" in titles:
+        if scenario == "refuse_cut" and not so and not model and "paper 1" in titles:
             refuse(cut_reply(titles, "paper 1"))
+        if scenario.startswith("hits_") and not so and len(titles) == 2:
+            if not model and scenario == "hits_cut":
+                refuse(cut_reply(titles, "paper 3"))
+            if not model or scenario == "hits_refused_all":
+                refuse()
         if scenario == "input" and "paper 2" in titles:
             return reply(apology)
         if scenario.startswith("cut") and not so and not model and "paper 1" in titles:
@@ -140,7 +165,8 @@ def run_scenario(scenario):
         if scenario == "cut_suspect" and so and titles == ["paper 1"]:
             return reply(apology)
         if not so:
-            if scenario in ("stopped", "hitfail", "quota") and len(titles) == 4:
+            if (scenario in ("stopped", "hitfail", "quota") or scenario.startswith("hits_")) \
+                    and len(titles) == 4:
                 return reply(apology)
             if scenario == "hitfail" and len(titles) < 4:
                 return reply(apology)
